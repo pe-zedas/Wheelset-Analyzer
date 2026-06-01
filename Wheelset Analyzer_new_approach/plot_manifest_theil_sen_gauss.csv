@@ -1,0 +1,25 @@
+﻿PLOT_NR;TOPEINHEITBEZEICHNUNG;DGEINBAUPOS;RSEINBAUPOS
+1;FLIRT 101;C00 Laufdrehgestell 1;C0402 Losradachse 1
+2;FLIRT 101;C00 Laufdrehgestell 1;C0402 Losradachse 2
+3;FLIRT 101;C00 Laufdrehgestell 2;C0402 Losradachse 1
+4;FLIRT 101;C00 Laufdrehgestell 2;C0402 Losradachse 2
+5;FLIRT 101;C00 Triebdrehgestell 1;C0402 Treibradsatz 1
+6;FLIRT 101;C00 Triebdrehgestell 1;C0402 Treibradsatz 2
+7;FLIRT 101;C00 Triebdrehgestell 2;C0402 Treibradsatz 1
+8;FLIRT 101;C00 Triebdrehgestell 2;C0402 Treibradsatz 2
+9;FLIRT 102;C00 Laufdrehgestell 1;C0402 Losradachse 1
+10;FLIRT 102;C00 Laufdrehgestell 1;C0402 Losradachse 2
+11;FLIRT 102;C00 Laufdrehgestell 2;C0402 Losradachse 1
+12;FLIRT 102;C00 Laufdrehgestell 2;C0402 Losradachse 2
+13;FLIRT 102;C00 Triebdrehgestell 1;C0402 Treibradsatz 1
+14;FLIRT 102;C00 Triebdrehgestell 1;C0402 Treibradsatz 2
+15;FLIRT 102;C00 Triebdrehgestell 2;C0402 Treibradsatz 1
+16;FLIRT 102;C00 Triebdrehgestell 2;C0402 Treibradsatz 2
+17;FS101;C00 Laufdrehgestell 1;C0402 Losradachse 1
+18;FS101;C00 Laufdrehgestell 1;C0402 Losradachse 2
+19;FS101;C00 Laufdrehgestell 2;C0402 Losradachse 1
+20;FS101;C00 Laufdrehgestell 2;C0402 Losradachse 2
+21;FS101;C00 Triebdrehgestell 1;C0402 Treibradsatz 1
+22;FS101;C00 Triebdrehgestell 1;C0402 Treibradsatz 2
+23;FS101;C00 Triebdrehgestell 2;C0402 Treibradsatz 1
+24;FS101;C00 Triebdrehgestell 2;C0402 Treibradsatz 2
