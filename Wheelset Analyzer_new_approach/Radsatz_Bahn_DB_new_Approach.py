@@ -27,7 +27,14 @@ except ModuleNotFoundError as exc:
         "Oracle-Treiber nicht gefunden. Installiere mit: python -m pip install oracledb"
     ) from exc
 
-from datetime2matlabdn import datetime2matlabdn, matlabdn2datetime
+from dates_np import (
+    NAT,
+    add_days,
+    days_to_timedelta64,
+    is_nat,
+    timedelta64_to_days,
+    to_datetime64_array,
+)
 from toolsWheelset import getStartIndexLastCycle
 from MeterList import MeterList
 from VehicleAxis import VehicleAxis
@@ -152,11 +159,17 @@ def _extract_baureihe(vehicle_desc: str) -> str:
 
 def _calc_days_per_km_from_meter(met: MeterList) -> float:
     km = np.asarray(met.getkm(), dtype=float)
-    nd = np.asarray(met.getnDates(), dtype=float)
-    if km.size < 2 or nd.size < 2 or km.size != nd.size:
+    nd_raw = met.getnDates()
+    n_len = len(nd_raw) if hasattr(nd_raw, "__len__") else 0
+    if km.size < 2 or n_len < 2 or km.size != n_len:
         return 0.01
+    # nDates ist np.ndarray[datetime64[s]] — Differenz liefert timedelta64
+    if hasattr(nd_raw, "dtype") and np.issubdtype(nd_raw.dtype, np.datetime64):
+        nd = np.asarray(nd_raw)
+    else:
+        nd = np.array(list(nd_raw), dtype="datetime64[s]")
     dkm = np.diff(km)
-    dday = np.diff(nd)
+    dday = timedelta64_to_days(np.diff(nd))
     mask = (dkm > 0) & np.isfinite(dkm) & np.isfinite(dday)
     if not np.any(mask):
         return 0.01
@@ -249,18 +262,22 @@ def _build_theil_baureihe_fallback(
     km_limit = _km_threshold(min_val)
     days_per_km = _calc_days_per_km_from_meter(met)
 
-    n_dates = np.asarray(met.getnDates(), dtype=float)
-    last_dn = float(n_dates[-1]) if n_dates.size else 0.0
-    date_prog = last_dn + (km_prog - last_km) * days_per_km
+    nd_raw = met.getnDates()
+    n_len = len(nd_raw) if hasattr(nd_raw, "__len__") else 0
+    last_dn = nd_raw[-1] if n_len > 0 else NAT
+    if is_nat(last_dn):
+        date_prog = np.array([], dtype="datetime64[s]")
+    else:
+        date_prog = last_dn + days_to_timedelta64((km_prog - last_km) * days_per_km)
 
-    def _km_to_datenum(km_thresh: Optional[float]) -> float:
-        if km_thresh is None or days_per_km <= 0 or last_dn <= 0:
-            return 0.0
-        return float(last_dn + (km_thresh - last_km) * days_per_km)
+    def _km_to_datenum(km_thresh: Optional[float]):
+        if km_thresh is None or days_per_km <= 0 or is_nat(last_dn):
+            return NAT
+        return add_days(last_dn, (float(km_thresh) - last_km) * days_per_km)
 
     met.setkmProg(km_prog.tolist())
     met.setvaluesProg(lkd_prog.tolist())
-    met.setnDatesProg(date_prog.tolist() if last_dn > 0 else [])
+    met.setnDatesProg(date_prog if date_prog.size else [])
     met.setgelb_min_Prog_km(km_warn if km_warn is not None and km_warn > 0 else 0.0)
     met.setmin_Prog_km(km_limit if km_limit is not None and km_limit > 0 else 0.0)
     met.setgelb_min_Prog_dt(_km_to_datenum(km_warn))
@@ -858,12 +875,12 @@ def main() -> None:
                 tVehicle.setausbau(r[16])
                 tVehicle.setaktuell(r[17])
     
-            # ── Datum in Matlab-Datenzahlen konvertieren ───────────────────────────
+            # ── Datum als numpy.datetime64[s]-Array ablegen ─────────────────────────
             for key, tmpVehicle in _sorted_vehicle_axis_items(dict_VehicleAxis):
                 for met in (tmpVehicle.getmeterList1(), tmpVehicle.getmeterList2()):
                     dates = met.getstrDates()
                     if len(dates) > 1:
-                        met.setnDates([datetime2matlabdn(d) for d in dates])
+                        met.setnDates(to_datetime64_array(dates))
 
             # ── Reprofilierungsparameter datengetrieben lernen ─────────────────
             ini_reprof = reprofiling_params_from_radsatz_config(cfg)

@@ -8,7 +8,7 @@ sys.path.insert(0, SCRIPT_DIR)
 
 from collections import defaultdict
 
-from datetime2matlabdn import datetime2matlabdn
+from dates_np import to_datetime64_array
 from toolsWheelset import getStartIndexLastCycle
 from MeterList import MeterList
 from VehicleAxis import VehicleAxis
@@ -56,7 +56,7 @@ for r in res2:
 for t in d.values():
     for met in (t.getmeterList1(), t.getmeterList2()):
         if len(met.getstrDates()) > 1:
-            met.setnDates([datetime2matlabdn(x) for x in met.getstrDates()])
+            met.setnDates(to_datetime64_array(met.getstrDates()))
 
 _ini = reprofiling_params_from_radsatz_config(cfg)
 set_reprofiling_params_per_axis(

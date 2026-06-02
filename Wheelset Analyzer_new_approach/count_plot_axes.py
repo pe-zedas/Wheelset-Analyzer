@@ -12,7 +12,7 @@ from radsatz_matplotlib import configure_matplotlib_backend
 cfg = load_radsatz_config(SCRIPT_DIR)
 print("Backend:", configure_matplotlib_backend("Agg", plot_show_window=False))
 
-from datetime2matlabdn import datetime2matlabdn
+from dates_np import to_datetime64_array
 from toolsWheelset import getStartIndexLastCycle
 from MeterList import MeterList
 from VehicleAxis import VehicleAxis
@@ -53,7 +53,7 @@ for r in res2:
 for key, tmpVehicle in dict_VehicleAxis.items():
     for met in (tmpVehicle.getmeterList1(), tmpVehicle.getmeterList2()):
         if len(met.getstrDates()) > 1:
-            met.setnDates([datetime2matlabdn(d) for d in met.getstrDates()])
+            met.setnDates(to_datetime64_array(met.getstrDates()))
 
 _ini_reprof = reprofiling_params_from_radsatz_config(cfg)
 set_reprofiling_params_per_axis(

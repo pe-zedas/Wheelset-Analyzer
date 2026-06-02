@@ -20,6 +20,7 @@ except ImportError as _exc:
 
 from MeterList import MeterList
 from reprof_learning import ReprofilingParams, get_reprofiling_params, is_reprofiling
+from dates_np import NAT, add_days, days_to_timedelta64, is_nat, timedelta64_to_days
 
 
 @dataclass(frozen=True)
@@ -222,11 +223,13 @@ def _find_last_reprofiling_in_cycle(
 
 def _calc_days_per_km_robust(
     km_cycle: np.ndarray,
-    date_num_cycle: np.ndarray,
+    date_cycle: np.ndarray,
     axis_key: str,
 ) -> float:
+    """date_cycle als np.ndarray[datetime64[s]] erwartet → liefert Tage/km als float."""
     dk = km_cycle[1:] - km_cycle[:-1]
-    dd = date_num_cycle[1:] - date_num_cycle[:-1]
+    # Differenz zweier datetime64 → timedelta64, dann in Tage als float
+    dd = timedelta64_to_days(np.diff(date_cycle))
     valid = dk > 0
     if not np.any(valid):
         logging.warning("daysPerKm: keine gültigen Paare für %s, nutze Standardwert", axis_key)
@@ -335,7 +338,12 @@ def _calc_prognosis_axis(
 
     km_all = np.array(met.getkm(), dtype=float)
     lkd_all = np.array(met.getvalues(), dtype=float)
-    date_num_all = np.array(met.getnDates(), dtype=float)
+    # nDates ist np.ndarray[datetime64[s]] (oder leere Liste, wenn keine Messdaten)
+    n_dates_raw = met.getnDates()
+    if hasattr(n_dates_raw, "dtype") and np.issubdtype(n_dates_raw.dtype, np.datetime64):
+        date_num_all = np.asarray(n_dates_raw, dtype="datetime64[s]")
+    else:
+        date_num_all = np.array(list(n_dates_raw), dtype="datetime64[s]")
 
     km_cycle = km_all[nIndex:]
     lkd_cycle = lkd_all[nIndex:]
@@ -494,13 +502,15 @@ def _calc_prognosis_axis(
 
     days_per_km = _calc_days_per_km_robust(km_cycle, date_cycle, axis_key)
 
-    last_date_num = float(date_cycle[-1])
-    date_prog = last_date_num + (km_prog - last_km) * days_per_km
+    # last_date als np.datetime64-Skalar; date_prog als datetime64-Array
+    last_date = date_cycle[-1]
+    date_prog = last_date + days_to_timedelta64((km_prog - last_km) * days_per_km)
 
-    def _km_to_datenum(km_thresh: Optional[float]) -> float:
-        if km_thresh is None or days_per_km <= 0:
-            return 0.0
-        return last_date_num + (km_thresh - last_km) * days_per_km
+    def _km_to_datenum(km_thresh: Optional[float]):
+        """km-Schwellwert → np.datetime64 (NaT bei ungültig)."""
+        if km_thresh is None or days_per_km <= 0 or is_nat(last_date):
+            return NAT
+        return add_days(last_date, (float(km_thresh) - last_km) * days_per_km)
 
     dt_warn = _km_to_datenum(km_warn)
     dt_limit = _km_to_datenum(km_limit)
@@ -533,10 +543,11 @@ def _calc_prognosis_axis(
     if len(km_prog_reprof) >= 2 and len(lkd_prog_reprof) == len(km_prog_reprof):
         km_list = [float(k) for k in km_prog_reprof]
         lkd_list = [float(y) for y in lkd_prog_reprof]
-        date_list = [last_date_num + (k - last_km) * days_per_km for k in km_list]
+        km_arr = np.asarray(km_list, dtype=float)
+        date_arr = last_date + days_to_timedelta64((km_arr - last_km) * days_per_km)
         met.setkmProg(km_list)
         met.setvaluesProg(lkd_list)
-        met.setnDatesProg(date_list)
+        met.setnDatesProg(date_arr)
         prog_curve_uses_reprof = True
         logging.info(
             "Prognosekurve (Export/Plot): Reprof-Szenario, %d Punkte | %s",
@@ -546,12 +557,12 @@ def _calc_prognosis_axis(
     else:
         met.setkmProg(km_prog.tolist())
         met.setvaluesProg(lkd_prog.tolist())
-        met.setnDatesProg(date_prog.tolist())
+        met.setnDatesProg(date_prog)
 
     met.setgelb_min_Prog_km(km_export_warn if km_export_warn is not None and km_export_warn > 0 else 0.0)
     met.setmin_Prog_km(km_export_limit if km_export_limit is not None and km_export_limit > 0 else 0.0)
-    met.setgelb_min_Prog_dt(dt_export_warn)
-    met.setmin_Prog_dt(dt_export_limit)
+    met.setgelb_min_Prog_dt(dt_export_warn)  # datetime64 oder NaT
+    met.setmin_Prog_dt(dt_export_limit)      # datetime64 oder NaT
 
     logging.info(
         "Prognose: km_warn=%.0f km_limit=%.0f km_warn_konservativ=%.0f "

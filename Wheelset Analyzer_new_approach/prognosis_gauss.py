@@ -52,7 +52,12 @@ def _iqr_mask(km: np.ndarray, lkd: np.ndarray, iqr_factor: float) -> np.ndarray:
     return np.abs(residuals) <= iqr_factor * iqr
 
 
-def _filter_list_tail(lst: List, n_index: int, mask: np.ndarray) -> List:
+def _filter_list_tail(lst, n_index: int, mask: np.ndarray):
+    """Wendet eine Bool-Maske auf den Tail (ab n_index) an. Unterstützt Listen und np.ndarray."""
+    if isinstance(lst, np.ndarray):
+        head = lst[:n_index]
+        tail_filtered = lst[n_index:][mask]
+        return np.concatenate([head, tail_filtered])
     tail = lst[n_index:]
     return lst[:n_index] + [v for v, keep in zip(tail, mask) if keep]
 

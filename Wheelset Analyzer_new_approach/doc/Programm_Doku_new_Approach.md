@@ -1,6 +1,6 @@
 # Programmdokumentation: Radsatz_Bahn_DB_new_Approach.py
 
-Stand: 2026-05-28, Rev. 2 (Methodenumschaltung, Kombimodus, Fallbacks, Plot-Harmonisierung)  
+Stand: 2026-06-01, Rev. 5 (Datums-Speicherung umgestellt auf `numpy.datetime64`; Matlab-Datezahl entfällt im neuen Ansatz)  
 Autor: Peter Engel  
 Basis: `doc/Neuer_Ansatz_Radsatz_Analyse_Prognose_CL.md`
 
@@ -26,19 +26,182 @@ Basis: `doc/Neuer_Ansatz_Radsatz_Analyse_Prognose_CL.md`
 
 ## 1. Zweck und Abgrenzung
 
-### 1.1 Aufgabe
+### 1.1 Aufgabe und Zielsetzung
 
-Das Programm liest Radsatz-Messdaten (Laufkreisdurchmesser LKD1 und LKD2) aus einer Oracle-Datenbank
-(`BO_RADSATZDATEN`) oder einem CSV-Export und berechnet für jede aktuell eingebaute Achse eine
-Verschleißprognose. Ausgegeben werden:
+Das Programm unterstützt die **vorausschauende Instandhaltungsplanung** für eingebaute Radsätze
+in der VGF-/ZEDAS-Datenwelt. Es verbindet drei eng zusammenhängende Aufgaben:
 
-- voraussichtliche **Laufleistung** (km) bis zur **Warnschwelle** (GELB_MIN) und zum **Grenzwert** (MIN)
-- zugehörige **Datumsschätzungen**
-- ein optionaler **konservativer Schätzwert** (pessimistisches Konfidenzintervall)
+1. **Verschleißprognose** — Wie entwickelt sich der Laufkreisdurchmesser (LKD) weiter, und wann
+   werden betriebliche Warn- und Grenzwerte voraussichtlich erreicht?
+2. **Reprofilierung aus der Historie schätzen** — Wann und wie stark wurde in der Vergangenheit
+   reprofiliert (Sprünge in der Messreihe), und welche typischen Intervalle und Abtragstiefen
+   gelten für eine Achse oder die Flotte?
+3. **Reprofilierung in die Zukunft einplanen** — Wie sieht die Prognose aus, wenn periodisch
+   nachgebearbeitet wird (Zickzack-Kurve), und wie verschiebt das die km- und Datumsschwellen?
 
-Das Ergebnis wird in `BO_RADSATZDATEN_PROGNOSE` (Datenbank) oder in eine CSV-Datei geschrieben.
+**Eingabe:** Historische Messreihen je Achse und Rad (LKD1/LKD2) aus `BO_RADSATZDATEN` (Oracle)
+oder CSV-Export — Laufleistung, LKD, Datum sowie die je Messpunkt hinterlegten Schwellen
+`GELB_MIN` und `MIN`.
 
-### 1.2 Abgrenzung zum Vorgängerprogramm
+**Ausgabe:** Prognosekurven und Schwellentermine für die Datenbanktabelle
+`BO_RADSATZDATEN_PROGNOSE` oder eine kompatible CSV; optional Diagramme zur Sichtprüfung.
+
+Damit lassen sich Wartungsfenster, Reprofilierungstermine und kritische Laufleistungen früher
+abschätzen als aus der bloßen Betrachtung der letzten Messwerte.
+
+---
+
+### 1.2 Berechnung der Prognosedaten (Verschleiß)
+
+#### Was prognostiziert wird
+
+Für jede **aktuell eingebaute Achse** (Fahrzeug + Drehgestell-Position + Radsatz-Position) und
+für **beide Räder** (`Rad-Laufkreisdurchmesser-1` / `-2`) wird aus der Messhistorie abgeleitet:
+
+| Ergebnis | Bedeutung |
+|----------|-----------|
+| **Prognosekurve** | Folge von Punkten `(LAUFLEISTUNG, STAND, DATUM)` bis zum Prognosehorizont `n_km` |
+| **KM_WARNWERT / DATUM_WARNWERT** | Erreichen der gelben Warnschwelle (`GELB_MIN`) |
+| **KM_GRENZWERT / DATUM_GRENZWERT** | Erreichen des unteren Grenzwerts (`MIN`) |
+| **Konservative Schätzung** (Theil-Sen) | Zusätzlich pessimistische km/Datum über das 90%-KI der Steigung (`slope_low`) |
+
+Die **Datumsschätzung** entsteht nicht aus einem Kalendermodell, sondern aus der gemessenen
+Beziehung „Tage pro Kilometer“: aus den letzten Zykluspunkten wird ein robuster Median der
+km-/Datums-Differenzen gebildet (`days_per_km`) und auf die km-Schwellen hochgerechnet.
+
+#### Verarbeitungsschritte (fachlich)
+
+1. **Achsenbildung** — Alle Messpunkte mit leerem `AUSBAU` werden den eingebauten Achsen
+   zugeordnet; pro Achse existieren zwei parallele Zählerreihen (LKD1, LKD2).
+2. **Verschleißzyklus** — Zunächst wird der **letzte Verschleißzyklus** bestimmt: große positive
+   Sprünge im LKD (Reprofilierung / Radtausch) schneiden ältere Zyklen ab (`diff_lkd`, Standard
+   20 mm). Optional wird innerhalb des Zyklus die **letzte dokumentierte Reprofilierung** erkannt
+   und nur der **Sub-Zyklus danach** für den Fit verwendet (siehe Abschnitt 1.3).
+3. **Datenbereinigung** — IQR-Filter entfernt Ausreißer in LKD und Laufleistung.
+4. **Trendmodell** — Je nach `prognosis_method`:
+   - **Theil-Sen:** robuste lineare Verschleißrate (mm/km) mit Konfidenzintervall; optional
+     Power-Law, wenn der lineare Fit zu ungenau ist.
+   - **Gauss-Newton:** exponentielle Kurve in der km-Domäne (Legacy-Logik über
+     `VehicleAxis.CalcPrognostic`).
+5. **Schwellenschnitt** — Aus dem Trend werden die km errechnet, an denen `GELB_MIN` bzw. `MIN`
+   unterschritten werden; daraus die Datumsprognose.
+6. **Persistenz** — Bei `write_prog_data=true` Schreiben in `BO_RADSATZDATEN_PROGNOSE` bzw. CSV.
+
+#### Zwei Planungsperspektiven
+
+| Perspektive | Annahme | Nutzen |
+|------------|---------|--------|
+| **Ohne weitere Reprofilierung** | Kontinuierlicher Verschleiß bis zur Schwelle | „Was passiert, wenn nichts nachgearbeitet wird?“ |
+| **Mit geplanter Reprofilierung** | Periodische Wiederherstellung des LKD (Sprünge nach oben) | Realistischere Betriebsplanung bei regelmäßiger Nachbearbeitung |
+
+Im Theil-Sen-Zweig werden **Export und Prognosekurve** bevorzugt aus dem **Reprof-Szenario**
+gespeist, sobald es berechenbar ist; sonst gelten die linearen Schwellen. Im Plot können beide
+Sichtweisen (inkl. KI-Band nur ohne Reprof-Kurve) verglichen werden.
+
+---
+
+### 1.3 Reprofilierung: Erkennung, Schätzung und Einplanung
+
+Reprofilierung (Nachbearbeitung des Laufrads) zeigt sich in den Messdaten als **kurzfristiger
+Anstieg des LKD** bei geringer Zunahme der Laufleistung — im Gegensatz zum Verschleiß, bei dem
+der LKD mit steigender km **fällt**.
+
+#### 1.3.1 Erkennung in der Historie
+
+Modul `reprof_learning.py` wertet für jede Achse **LKD1 und LKD2 gemeinsam** alle Messpaare aus:
+
+- `Δkm` = Differenz der Laufleistung zwischen zwei aufeinanderfolgenden Messungen
+- `ΔLKD` = Differenz des LKD
+
+Ein Ereignis gilt als **Reprofilierung**, wenn gleichzeitig:
+
+- `ΔLKD < 0` (LKD steigt — „negativer Verschleißschritt“),
+- `Δkm ≤ dkm_threshold` (Sprung erfolgt in kurzer Laufstrecke),
+- `|ΔLKD| ≥ dlkd_abs_min` (Mindestabtrag in mm).
+
+Die Schwellen `dkm_threshold` und `dlkd_abs_min` werden **datengetrieben** aus vielen solcher
+Sprünge geschätzt (Perzentile über „Seed“-Ereignisse mit kleinem km-Abstand und ausreichendem
+LKD-Anstieg). Aus den erkannten Ereignissen werden zwei **Betriebsparameter** abgeleitet:
+
+| Parameter | Bedeutung | Verwendung |
+|-----------|-----------|------------|
+| **typical_interval_km** | Median der Abstände [km] zwischen aufeinanderfolgenden Reprofilierungen | Periodenlänge in der Zukunfts-Simulation |
+| **typical_magnitude_mm** | Median des LKD-Anstiegs [mm] je Reprofilierung | Abtragstiefe / Sprunghöhe in der Prognosekurve |
+
+Zusätzlich wird gezählt, wie viele Ereignisse (`n_detected`) zur Schätzung beigetragen haben.
+
+**Lernreihenfolge pro Achse** (`learn_reprofiling_params_per_axis`):
+
+1. Individuell aus der Historie dieser Achse (mindestens drei erkannte Seeds),
+2. sonst **Median** aller erfolgreich gelernten Achsen der Flotte,
+3. sonst **INI-Fallback** aus `[prognose]`: `n_km_repro`, `n_value_repro`, `reprof_dkm_threshold`,
+   `reprof_dlkd_abs_min`.
+
+Ein separater **Flottenlauf** (`learn_reprofiling_params`) dient vor allem dem Logging und
+Vergleich; maßgeblich für die Prognose sind die **pro-Achse-Parameter**.
+
+#### 1.3.2 Zeitpunkt der letzten Reprofilierung (Rückblick)
+
+Vor dem eigentlichen Fit sucht der Theil-Sen-Zweig im aktuellen Zyklus den **letzten**
+Reprofilierungssprung (`_find_last_reprofiling_in_cycle`). Liegt dieser nahe am Ende der
+Historie und liefert der Abschnitt **danach** genügend Messpunkte, wird nur dieser **Sub-Zyklus**
+gefittet — der Trend beschreibt dann den Verschleiß **seit der letzten Nachbearbeitung**, nicht
+seit einem älteren Radtausch.
+
+Das verbessert die Schätzung der aktuellen Verschleißrate, wenn im selben „großen“ Zyklus
+(mehrere tausend km) noch eine Reprofilierung stattfand.
+
+#### 1.3.3 Zeitpunkte künftiger Reprofilierungen (Vorausschau)
+
+Für die **Zukunftsplanung** wird ein **Szenario mit periodischer Reprofilierung** simuliert
+(`_simulate_with_reprofilings` in `prognosis_new_core.py`):
+
+- Ausgangspunkt: letzter Messpunkt `(last_km, last_lkd)` und geschätzte Verschleißrate `slope`.
+- Alle **`typical_interval_km`** km wird der LKD um **`typical_magnitude_mm`** angehoben
+  (Sprung nach oben, im Plot ein nahezu vertikaler Absatz).
+- Dazwischen fällt der LKD linear mit `slope` (Verschleiß).
+- Die Simulation endet, wenn
+  - **GELB_MIN** vor der nächsten Reprofilierung erreicht wird → `km_warn_reprof`,
+  - der LKD nach einer Reprofilierung **unter MIN** läge → keine sichere Nachbearbeitung mehr →
+    `km_limit_reprof`,
+  - oder der Horizont `n_km` ausgeschöpft ist.
+
+Die so erzeugte **Zickzack-Prognosekurve** (`km_prog_reprof`, `lkd_prog_reprof`) ist die
+betriebsnahe Darstellung: wiederholte Reprofilierungen verlängern die nutzbare Laufleistung,
+bis der Grenzwert auch nach einem Eingriff nicht mehr sicher eingehalten werden kann.
+
+**Gauss-Zweig:** Dieselben gelernten Werte `typical_interval_km` / `typical_magnitude_mm`
+(über `reprof_km_value_for_axis`) ersetzen die INI-Standardwerte `n_km_repro` / `n_value_repro`
+in `VehicleAxis.CalcPrognostic` / `insertReprofiling` — die Reprofilierungssprünge werden dort
+in die exponentielle Prognosekurve eingebettet.
+
+#### 1.3.4 Abtragstiefe bei der Reprofilierung
+
+Die **Abtragstiefe** im Sinne des Programms ist der **LKD-Anstieg pro Eingriff** in Millimeter:
+
+- **Historisch:** Median der betragsmäßigen Sprünge `|ΔLKD|` aller als Reprofilierung
+  klassifizierten Schritte → `typical_magnitude_mm`.
+- **Prognose:** Bei jedem simulierten Reprofilierungstermin wird der prognostizierte LKD um
+  genau diesen Betrag erhöht (Material wird wieder „aufgebaut“, der messbare Durchmesser steigt).
+
+Das ist **kein** separates Werkstattmaß aus einer anderen Datenquelle, sondern eine **statistische
+Schätzung aus der Messhistorie** der jeweiligen Achse (bzw. Flotten-Median / INI-Fallback).
+
+Typische INI-Startwerte: alle **30 000 km** reprofilieren, je **6 mm** Anstieg — werden durch
+das Lernen ersetzt, sobald genügend dokumentierte Ereignisse vorliegen.
+
+#### 1.3.5 Was nicht geschätzt wird
+
+- **Kein exakter Werkstatttermin** einzelner zukünftiger Reprofilierungen im Kalender — nur
+  km-basierte Periodizität plus Umrechnung in Datum über `days_per_km`.
+- **Keine Unterscheidung** zwischen Reprofilierung, Radtausch und Messartefakt — alles, was die
+  Sprungkriterien erfüllt, fließt in dieselbe Kategorie ein.
+- **Keine Reprofilierung** in der konservativen KI-Schätzung des Theil-Sen-Zweigs (KI bezieht
+  sich auf den linearen Trend ohne Sprünge).
+
+---
+
+### 1.4 Abgrenzung zum Vorgängerprogramm
 
 `Radsatz_Bahn_DB_new_Approach.py` ersetzt die Prognoseberechnung aus
 `Radsatz_Bahn_DB_KM_Default_Class_All.py`. Die DB-Schnittstelle und alle Hilfsklassen
@@ -67,18 +230,195 @@ Installation:
 python -m pip install numpy scipy matplotlib oracledb
 ```
 
-### 2.3 Benötigte Dateien im Projektverzeichnis
+### 2.3 Benötigte Dateien und Python-Module im Projektverzeichnis
 
-| Datei | Pflicht | Beschreibung |
-|-------|---------|-------------|
+| Datei / Modul | Pflicht | Beschreibung |
+|---------------|---------|-------------|
 | `radsatz_config.ini` | ja | Konfigurationsparameter (siehe Abschnitt 3) |
-| `bo_radsatzdaten_export.csv` | wenn `use_database=false` | Messdaten-Export |
-| `oracle_connect_string.txt` | wenn `use_database=true` | Oracle-Verbindungsstring |
-| `VehicleAxis.py` | ja | Datenhaltungsklasse |
-| `MeterList.py` | ja | Datenhaltungsklasse |
-| `radsatz_settings.py` | ja | Config-Loader |
-| `datetime2matlabdn.py` | ja | Datum-Konvertierung |
-| `toolsWheelset.py` | ja | Zykluserkennung |
+| `bo_radsatzdaten_export.csv` | bei `use_database=false` | Messdaten-Export (siehe 2.5) |
+| `oracle_connect_string.txt` | bei `use_database=true` | Oracle-Verbindungsstring (siehe 2.4) |
+| `Radsatz_Bahn_DB_new_Approach.py` | ja | Hauptprogramm |
+| `radsatz_settings.py`, `radsatz_csv_io.py` | ja | Config und CSV-Laden |
+| `prognosis_new_core.py`, `prognosis_gauss.py` | ja | Prognoseverfahren |
+| `reprof_learning.py` | ja | Reprofilierungsparameter |
+| `VehicleAxis.py`, `MeterList.py` | ja | Datenhaltung und DB/CSV-Ausgabe |
+| `GaussNewtonLinearReg_Exp.py` | ja | Exponentialfit (Gauss-Zweig) |
+| `dates_np.py`, `toolsWheelset.py` | ja | Datum-Konvertierung (`numpy.datetime64`-Helfer), Zykluserkennung |
+| `datetime2matlabdn.py` | nein | nur noch von Legacy-Skripten (`Radsatz_Bahn_DB_KM_Gauss_Class_All*.py`) verwendet |
+| `radsatz_axis_labels.py`, `radsatz_matplotlib.py` | ja | Achsbezeichnungen, Plot-Backend |
+
+Optional zum Erzeugen der Eingabedaten:
+
+| Skript | Zweck |
+|--------|--------|
+| `export_bo_radsatzdaten_csv.py` | Vollständiger Export `BO_RADSATZDATEN` → CSV |
+| `export_bo_radsatzdaten_prognose_csv.py` | Export bestehender Prognosezeilen (Vergleich) |
+
+---
+
+### 2.4 Datentechnische Voraussetzungen (Überblick)
+
+Das Programm erwartet **historische Radsatz-Messwerte** im ZEDAS-/VGF-Schema der Tabelle `BO_RADSATZDATEN`. Pro **eingebauter Achse** (Fahrzeug + Drehgestell-Position + Radsatz-Position) werden zwei parallele Messreihen verarbeitet:
+
+| Zähler (`ZARTBEZ`) | Inhalt |
+|--------------------|--------|
+| `Rad-Laufkreisdurchmesser-1` | LKD Rad 1 |
+| `Rad-Laufkreisdurchmesser-2` | LKD Rad 2 |
+
+**Fachliche Mindestanforderungen pro Achse und Zähler:**
+
+| Anforderung | Details |
+|-------------|---------|
+| Einbau aktiv | `AUSBAU` muss leer/`NULL` sein (nur aktuell eingebaute Radsätze) |
+| Zeitraum | `DATUM` > `dt_start_data` (INI, Standard `2014-01-01`) |
+| Pflichtfelder je Messpunkt | `DATUM`, `STAND` (LKD [mm]), `LAUFLEISTUNG` [km], `MIN`, `MAX`, `GELB_MIN` — fehlt eines davon, wird der Punkt verworfen |
+| Punkte für Fit | Nach Zyklus- und IQR-Filter mindestens `min_points_fit` Punkte (INI `[prognose_new]`, Standard `3`) |
+| Qualität „OK“ | Optional höher: `min_points_quality` (Standard `8`) — sonst Flag `LOW` |
+| Zyklus | Letzter Verschleißzyklus wird über Sprünge in `STAND` erkannt (`diff_lkd`, Standard `20` mm); ohne erkennbaren Sprung wird die gesamte gefilterte Reihe genutzt |
+| Laufleistung | Sollte innerhalb einer Achse/Zählerreihe **monoton wachsen**; für Datumsprognose werden aus km-Differenzen Tage/km abgeleitet |
+| Power-Law (optional) | Nur bei **positiven** `LAUFLEISTUNG` und `STAND`; mindestens 6 Punkte nach Filter |
+
+**Oracle vs. CSV:** Dieselben fachlichen Filter und Spaltensemantik; Unterschied nur in der Datenquelle (`use_database` in `[pipeline]`).
+
+---
+
+### 2.5 Oracle-Datenbankzugriff
+
+#### Verbindung
+
+| Voraussetzung | Beschreibung |
+|---------------|-------------|
+| `use_database = true` | in `[pipeline]` |
+| Connect-String | Eine Zeile in `oracle_connect_string.txt` (relativ zum Skript) **oder** Umgebungsvariable `ORACLE_CONNECT_STRING` (überschreibt Datei) |
+| Oracle Client | `oracledb.init_oracle_client()` — **Oracle Instant Client** muss auf dem Rechner installiert und auffindbar sein (Thick-Mode) |
+| Berechtigungen | `SELECT` auf `BO_RADSATZDATEN`; bei `write_prog_data=true` zusätzlich `INSERT`/`DELETE` auf `BO_RADSATZDATEN_PROGNOSE` |
+
+Beispiel Connect-String (Format wie von `oracledb` erwartet):
+
+```text
+benutzer/kennwort@host:1521/service_name
+```
+
+#### Eingabetabelle `BO_RADSATZDATEN`
+
+Das Hauptprogramm liest zwei Abfragen (Oracle-Spaltennamen in Kleinschreibung in SQL):
+
+**Abfrage 1 — Achsenliste (`res1`):**
+
+```sql
+SELECT topeinheitbezeichnung, dgeinbaupos, rseinbaupos
+FROM bo_radsatzdaten
+WHERE ausbau IS NULL
+GROUP BY topeinheitbezeichnung, dgeinbaupos, rseinbaupos
+```
+
+**Abfrage 2 — Messwerte (`res2`):**
+
+```sql
+SELECT topeinheitbezeichnung, dgeinbaupos, rseinbaupos, zartbez, datum, stand,
+       laufleistung, min, max, gelb_min, topeinheitid, dgeinheitid, dgbezeichnung,
+       rseinheitid, rsbezeichnung, einbau, ausbau, aktuell, zaehlerartid
+FROM bo_radsatzdaten
+WHERE zartbez IN ('Rad-Laufkreisdurchmesser-1', 'Rad-Laufkreisdurchmesser-2')
+  AND datum > TO_DATE(:StartDatum, 'YYYY-MM-DD')
+  AND ausbau IS NULL
+ORDER BY datum
+```
+
+| Spalte (DB) | Pflicht für Verarbeitung | Rolle |
+|-------------|-------------------------|--------|
+| `TOPEINHEITBEZEICHNUNG`, `DGEINBAUPOS`, `RSEINBAUPOS` | ja | Achsidentifikation |
+| `ZARTBEZ` | ja | Nur die beiden LKD-Zähler (siehe oben) |
+| `DATUM` | ja | Messzeitpunkt |
+| `STAND` | ja | Laufkreisdurchmesser [mm] |
+| `LAUFLEISTUNG` | ja | Laufleistung [km] |
+| `MIN`, `MAX`, `GELB_MIN` | ja | Grenz- und Warnschwellen je Messpunkt |
+| `TOPEINHEITID`, `DGEINHEITID`, `RSEINHEITID` | empfohlen | Metadaten für Export/Prognose |
+| `DGBEZEICHNUNG`, `RSBEZEICHNUNG` | optional | Anzeige in Plots und CSV-Ausgabe |
+| `EINBAU`, `AKTUELL`, `ZAEHLERARTID` | optional | Metadaten; werden an `VehicleAxis` übernommen |
+| `AUSBAU` | Filter | Muss `NULL` sein, sonst wird die Zeile ignoriert |
+
+Weitere Spalten der Tabelle werden beim Lesen **nicht** ausgewertet.
+
+#### Ausgabetabelle `BO_RADSATZDATEN_PROGNOSE` (optional)
+
+Nur wenn `write_prog_data = true`:
+
+- Vor dem Insert: Löschen alter Zeilen mit `LETZTEAENDZEIT` älter als `n_days_2_delete` Tage.
+- Insert-Spalten: `TOPEINHEITID`, `TOPEINHEITBEZEICHNUNG`, `DGEINHEITID`, `DGBEZEICHNUNG`, `DGEINBAUPOS`, `RSEINHEITID`, `RSBEZEICHNUNG`, `RSEINBAUPOS`, `EINBAU`, `AUSBAU`, `AKTUELL`, `ZAEHLERARTID`, `ZARTBEZ`, `STAND`, `DATUM`, `LAUFLEISTUNG`, `LETZTEAENDZEIT`, `KM_GRENZWERT`, `DATUM_GRENZWERT`, `KM_WARNWERT`, `DATUM_WARNWERT` (siehe Abschnitt 8.1).
+
+Bei mehreren aktiven Prognosemethoden (`theil_sen, gauss`) wird nur die **erste** Methode in der INI-Reihenfolge exportiert.
+
+---
+
+### 2.6 CSV-Eingabe (`bo_radsatzdaten_export.csv`)
+
+#### Wann
+
+`use_database = false` — Pfad über `[paths] csv_bo_radsatzdaten` (Standard: `bo_radsatzdaten_export.csv` im Skriptverzeichnis).
+
+#### Dateiformat
+
+| Eigenschaft | Wert |
+|-------------|------|
+| Encoding | UTF-8 mit BOM (`utf-8-sig`) |
+| Trennzeichen | Semikolon (`;`) |
+| Kopfzeile | Spaltennamen wie Oracle-Export (Großbuchstaben) |
+| Datumsformat | `YYYY-MM-DD` oder `YYYY-MM-DD HH:MM:SS` (optional Millisekunden) |
+| Dezimalzahlen | Punkt oder Komma (wird intern normalisiert) |
+
+Empfohlen: Export mit `python export_bo_radsatzdaten_csv.py` — liefert `SELECT * FROM bo_radsatzdaten` mit konsistenten Spaltennamen.
+
+#### Pflicht-Spalten (werden ausgewertet)
+
+Die Loader-Logik (`radsatz_csv_io.load_bo_radsatz_from_csv`) nutzt dieselben Felder wie die Oracle-Abfrage:
+
+| Spalte | Pflicht | Hinweis |
+|--------|---------|---------|
+| `TOPEINHEITBEZEICHNUNG` | ja | Fahrzeugbezeichnung |
+| `DGEINBAUPOS` | ja | Drehgestell-Einbauposition |
+| `RSEINBAUPOS` | ja | Radsatz-Einbauposition |
+| `ZARTBEZ` | ja | Nur `Rad-Laufkreisdurchmesser-1` / `-2` |
+| `DATUM` | ja | > `dt_start_data` |
+| `STAND` | ja | LKD [mm] |
+| `LAUFLEISTUNG` | ja | [km] |
+| `MIN`, `MAX`, `GELB_MIN` | ja | Schwellen |
+| `AUSBAU` | Filter | **Leer** = eingebaut; gefülltes Datum = ausgebaut → Zeile wird übersprungen |
+| `TOPEINHEITID`, `DGEINHEITID`, `RSEINHEITID` | empfohlen | Für Prognose-Export |
+| `DGBEZEICHNUNG`, `RSBEZEICHNUNG` | optional | Beschriftung |
+| `EINBAU`, `AKTUELL`, `ZAEHLERARTID` | optional | Metadaten |
+
+**Nicht ausgewertet** (können im Export vorhanden sein): z. B. `GELB_MAX`, `LETZTEAENDZEIT` und alle weiteren Spalten des Vollexports.
+
+#### Beispiel-Kopfzeile (Auszug)
+
+```text
+TOPEINHEITID;TOPEINHEITBEZEICHNUNG;DGEINHEITID;DGBEZEICHNUNG;DGEINBAUPOS;RSEINHEITID;RSBEZEICHNUNG;RSEINBAUPOS;EINBAU;AUSBAU;AKTUELL;ZAEHLERARTID;ZARTBEZ;STAND;DATUM;MIN;MAX;GELB_MIN;LAUFLEISTUNG;...
+```
+
+#### Typische Fehlerquellen
+
+| Problem | Symptom |
+|---------|---------|
+| Alle Zeilen haben `AUSBAU` gesetzt | `res1`/`res2` leer → „Keine Messdaten gefunden“ |
+| Falsche `ZARTBEZ` | Keine LKD-Reihen |
+| `DATUM` vor `dt_start_data` | Zeilen werden still gefiltert |
+| Fehlende `STAND`/`LAUFLEISTUNG`/Schwellen | Warnung „Zählerdaten nicht vollständig“, Punkt übersprungen |
+| Zu wenige Punkte im letzten Zyklus | Qualität `INSUFFICIENT`, kein Plot/Export für diese Achse |
+
+---
+
+### 2.7 CSV-Ausgabe der Prognose (optional)
+
+Wenn `use_database = false` und `write_prog_data = true`:
+
+| Eigenschaft | Wert |
+|-------------|------|
+| Datei | `[paths] csv_bo_prognose_out` (Standard `bo_radsatzdaten_prognose_recalc.csv`) |
+| Format | `;`, UTF-8-BOM, Kopfzeile wie `BO_RADSATZDATEN_PROGNOSE` |
+| Spalten | siehe Abschnitt 8.1 / `_PROGNOSE_CSV_HEADER` im Hauptskript |
+
+Voraussetzung: Für die Achse wurde eine Prognose mit ausreichender Datenlage berechnet (`OK` oder `LOW`); bei `INSUFFICIENT` entstehen keine Prognosezeilen.
 
 ---
 
@@ -196,7 +536,8 @@ Radsatz_Bahn_DB_new_Approach.py          ← Hauptprogramm (Methoden-Orchestrier
 ├── prognosis_new_core.py                ← Theil-Sen + IQR + optional Power-Law
 ├── prognosis_gauss.py                   ← Gauss-Newton + IQR-Filter
 ├── reprof_learning.py                   ← Reprofilierungsparameter pro Achse
-├── datetime2matlabdn.py                 ← Datum ↔ Matlab-Datezahl
+├── dates_np.py                          ← Datums-Helfer (numpy.datetime64[s])
+├── datetime2matlabdn.py                 ← (Legacy) Datum ↔ Matlab-Datezahl, nur noch alte Skripte
 ├── toolsWheelset.py                     ← getStartIndexLastCycle()
 ├── MeterList.py                         ← Datenhaltung Messwerte + Prognosewerte
 └── VehicleAxis.py                       ← Datenhaltung + DB/CSV-Ausgabe
@@ -229,6 +570,12 @@ Achse berechnet und in einem gemeinsamen Diagramm überlagert dargestellt
                   │   MeterList LKD1/2) │
                   └──────────┬──────────┘
                              │
+                             ▼
+              ┌──────────────────────────────┐
+              │ learn_reprofiling_params_*   │
+              │ (Intervall + Abtrag je Achse)│
+              └──────────────┬───────────────┘
+                             │
               ┌──────────────┼──────────────┐
               │ für jede Achse              │
               ▼                             ▼
@@ -243,10 +590,11 @@ Achse berechnet und in einem gemeinsamen Diagramm überlagert dargestellt
    │ 3. IQR-Filter        │
    │ 4. Theil-Sen-Fit     │
    │ 5. Power-Law (opt.)  │
-   │ 6. Schnittpunkte     │
-   │ 7. daysPerKm (Median)│
-   │ 8. Datum-Prognose    │
-   │ 9. MeterList setzen  │
+   │ 6. Reprof-Szenario   │
+   │ 7. Schnittpunkte     │
+   │ 8. daysPerKm (Median)│
+   │ 9. Datum-Prognose    │
+   │10. MeterList setzen  │
    └─────────────────────┘
               │
               ▼
@@ -415,7 +763,7 @@ schreibt die Ergebnisse direkt in das übergebene `MeterList`-Objekt.
 | 7 | Schnittpunkte mit GELB_MIN und MIN (median + konservativ) |
 | 8 | Prognosekurve generieren (`N_PROG_POINTS` Punkte) |
 | 9 | Robuste `daysPerKm`-Schätzung (`_calc_days_per_km_robust`) |
-| 10 | Datum-Prognose (km → Matlab-Datezahl) |
+| 10 | Datum-Prognose (km → `numpy.datetime64[s]` via `last_date + days_to_timedelta64(km_delta · days_per_km)`) |
 | 11 | Alle Ergebnisse in `MeterList` schreiben |
 
 **Felder, die in `MeterList` geschrieben werden:**
@@ -424,17 +772,20 @@ schreibt die Ergebnisse direkt in das übergebene `MeterList`-Objekt.
 |--------|--------|
 | `setkmProg` | km-Werte der Prognosekurve |
 | `setvaluesProg` | LKD-Werte der Prognosekurve [mm] |
-| `setnDatesProg` | Matlab-Datezahlen der Prognosekurve |
+| `setnDatesProg` | `numpy.ndarray[datetime64[s]]` der Prognosekurve |
 | `setgelb_min_Prog_km` | km bei GELB_MIN-Schnittpunkt (Median); **`0.0` wenn kein Schnittpunkt** |
 | `setmin_Prog_km` | km bei MIN-Schnittpunkt (Median); **`0.0` wenn kein Schnittpunkt** |
-| `setgelb_min_Prog_dt` | Matlab-Datezahl bei GELB_MIN-Schnittpunkt; `0.0` wenn nicht berechenbar |
-| `setmin_Prog_dt` | Matlab-Datezahl bei MIN-Schnittpunkt; `0.0` wenn nicht berechenbar |
+| `setgelb_min_Prog_dt` | `numpy.datetime64[s]` bei GELB_MIN-Schnittpunkt; `NaT` wenn nicht berechenbar |
+| `setmin_Prog_dt` | `numpy.datetime64[s]` bei MIN-Schnittpunkt; `NaT` wenn nicht berechenbar |
 
-> **Hinweis zu `0.0` als Fehlerwert:** `MeterList` kennt keinen `None`-Typ für
-> numerische Felder. Fehlende Schnittpunkte werden daher als `0.0` gespeichert.
-> `VehicleAxis._prognose_insert_tuples_for_meter` prüft vor jedem DB-Insert
-> `if value > 0`, sodass `0.0` korrekt als „kein Wert" behandelt wird und kein
-> `NULL`-Fehler im Insert entsteht.
+> **Hinweis zu „kein Wert":** Für km-Felder wird weiterhin `0.0` als
+> Sentinelwert verwendet (`MeterList` initialisiert numerisch). Für Datums-Felder
+> wird `numpy.datetime64('NaT')` als „kein Wert"-Marker genutzt.
+> `VehicleAxis._prognose_insert_tuples_for_meter` konvertiert beim DB-Insert
+> über `dates_np.to_python_datetime()` zu einem Python-`datetime` (bzw. `None`
+> bei `NaT`/`0`); km-Felder werden via `if value > 0` als `None` geschrieben.
+> Damit entstehen am DB-Boundary nur native Python-Typen, die `oracledb`
+> akzeptiert (geprüft via `test_db_insert_types.py`).
 
 **Ausgabe:** Gibt immer eine `_PrognResult`-Dataclass zurück – auch bei
 unzureichender Datenlage (dann `quality = QUALITY_INSUFFICIENT`, keine
@@ -915,6 +1266,41 @@ in km und Prozent des tatsächlichen Restwegs.
   `radsatz_csv_io.py`, `radsatz_matplotlib.py`, `reprof_learning.py`.
 - `radsatz_settings.py` unterstützt Methodenliste (`prognosis_methods`)
   und zusätzliche Plot-/Fallback-Schalter.
+
+### 13.7 Datums-Speicherung auf `numpy.datetime64` umgestellt (Rev. 5)
+
+- `MeterList.nDates` und `MeterList.nDatesProg` sind im neuen Ansatz jetzt
+  `numpy.ndarray[datetime64[s]]` (statt Liste von Matlab-Datezahl-Floats).
+- `MeterList.gelb_min_Prog_dt` / `min_Prog_dt` sind `numpy.datetime64`-Skalare
+  (oder `NaT` für „kein Wert"); der bisherige `0.0`-Sentinel für Datums-Felder
+  entfällt im neuen Pfad.
+- Neues Helper-Modul `dates_np.py`:
+  - `to_datetime64_array(dates)` — Liste von Python-`datetime` → `np.datetime64[s]`-Array
+  - `to_python_datetime(dt)` — `np.datetime64` / `NaT` / `0` → Python-`datetime` (oder `None`)
+  - `add_days(dt64, days)`, `days_to_timedelta64(days)`, `timedelta64_to_days(td)`,
+    `is_nat(x)`, `NAT`
+- Berechnungen:
+  - `_calc_days_per_km_robust` und `_calc_days_per_km_from_meter` arbeiten auf
+    `timedelta64`-Differenzen statt Float-Differenzen.
+  - Datum-Prognose: `last_date + days_to_timedelta64((km − last_km) · days_per_km)`.
+  - `VehicleAxis.calcnDatesProg` rechnet intern in Float-Sekunden-seit-Epoche
+    (für `findXforY`-Interpolation) und konvertiert das Ergebnis zurück zu
+    `np.datetime64[s]`. `calcDaysPerKm` nutzt `timedelta64_to_days` für die
+    Tage/km-Schätzung.
+  - `VehicleAxis.eliminateJump` (Legacy-Gauss-Reprofilierungs-Erkennung) erkennt
+    `datetime64` automatisch und rechnet weiter in Float-Tagen (mathematisch
+    identisch zur alten matlabdn-Logik).
+- DB-Boundary: `VehicleAxis._prognose_insert_tuples_for_meter` nutzt
+  `to_python_datetime()` statt `matlabdn2datetime()`; alle DATUM-Spalten im
+  Insert-Tupel sind native `datetime.datetime` (oracledb-kompatibel).
+- `datetime2matlabdn.py` bleibt unverändert erhalten — wird nur noch von den
+  Legacy-Skripten `Radsatz_Bahn_DB_KM_Gauss_Class_All*.py` verwendet.
+- Test: `test_db_insert_types.py` simuliert den DB-Insert-Pfad mit einem
+  Mock-Cursor und prüft Typ-Korrektheit aller Insert-Tupel beider Methoden.
+
+**Motivation:** Saubere Trennung von „kein Wert" (NaT) und „echter 0-Wert",
+Wegfall des Schaltjahr-0-Offsets (`+366 days`) der Matlab-Datezahl, bessere
+Lesbarkeit der Zwischenwerte (datetime64 lässt sich in numpy direkt anzeigen).
 
 ---
 

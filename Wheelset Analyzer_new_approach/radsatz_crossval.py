@@ -25,7 +25,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from datetime2matlabdn import datetime2matlabdn
+from dates_np import to_datetime64_array
 from MeterList import MeterList
 from VehicleAxis import VehicleAxis
 from prognosis_new_core import PrognosisParams, _fit_theilsen, _outlier_filter_iqr
@@ -73,7 +73,7 @@ def _build_vehicle_dict(res1, res2):
         for met in (tmp_vehicle.getmeterList1(), tmp_vehicle.getmeterList2()):
             dates = met.getstrDates()
             if len(dates) > 1:
-                met.setnDates([datetime2matlabdn(d) for d in dates])
+                met.setnDates(to_datetime64_array(dates))
             else:
                 met.setnDates([])
 

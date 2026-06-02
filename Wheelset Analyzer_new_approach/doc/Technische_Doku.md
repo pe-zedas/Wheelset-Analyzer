@@ -9,11 +9,14 @@
 
 Gemeinsam: `radsatz_config.ini`, `radsatz_settings.py`, `MeterList`, `VehicleAxis` (Ausgabe), `toolsWheelset.getStartIndexLastCycle`, Oracle/CSV-Pfade.
 
+**Daten-Voraussetzungen:** `doc/Programm_Doku_new_Approach.md`, Abschnitt **2.4–2.7**.  
+**Aufgabe (Prognose, Reprofilierungs-Intervall/-Abtrag):** dort Abschnitt **1.1–1.3**.
+
 ## Datenfluss (gemeinsame Basis)
 
 - Quelle: Oracle-DB `BO_RADSATZDATEN` (historische Messwerte) und optional Ziel `BO_RADSATZDATEN_PROGNOSE`.
 - Abfrage: alle aktuell eingebauten Achsen (Fahrzeug/Drehgestell/Achse) und Messwerte fuer LKD1/LKD2 ab `dtStartData`.
-- Aufbereitung: Messreihen in zwei `MeterList`-Objekte (LKD1/LKD2); Datum wird in Matlab-Datenzahlen konvertiert.
+- Aufbereitung: Messreihen in zwei `MeterList`-Objekten (LKD1/LKD2); Datum wird als `numpy.datetime64[s]`-Array gespeichert (Helper: `dates_np.to_datetime64_array`). Im Legacy-Pfad (`Radsatz_Bahn_DB_KM_Default_Class_All.py`) gilt weiter die alte Matlab-Datezahl-Konvertierung.
 - Zyklus-Erkennung: `getStartIndexLastCycle()` identifiziert den Start des letzten Verschleisszyklus via Sprungkriterium `diffLKD`.
 - Output: Prognosewerte (km/Datum) und Warn-/Grenzwerte werden optional in `BO_RADSATZDATEN_PROGNOSE` geschrieben; alte Prognosen werden vorab geloescht (`nDays2Delete`).
 
@@ -102,7 +105,7 @@ Wenn Sie **gar kein** Bild sehen: Viewer hat oft **keine Bildvorschau** für lok
 
 ```mermaid
 flowchart LR
-  A[BO_RADSATZDATEN<br/>Messwerte] --> B[MeterList LKD1/2<br/>Datum->MatlabDN]
+  A[BO_RADSATZDATEN<br/>Messwerte] --> B[MeterList LKD1/2<br/>Datum->numpy.datetime64]
   B --> C[Zyklus-Erkennung<br/>diffLKD]
   C --> D{prognosis_method}
   D -->|theil_sen| E[Theil-Sen<br/>optional Power-Law]

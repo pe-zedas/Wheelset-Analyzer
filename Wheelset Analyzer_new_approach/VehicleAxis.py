@@ -8,7 +8,13 @@ import logging
 import numpy as np
 from GaussNewtonLinearReg_Exp import GaussNewtonLinearReg_ExpNorm
 from ContinuityError import ContinuityError
-from datetime2matlabdn import matlabdn2datetime
+from dates_np import (
+    NAT,
+    days_to_timedelta64,
+    is_nat,
+    timedelta64_to_days,
+    to_python_datetime,
+)
 from datetime import datetime
 
 _PROGNOSE_INSERT_SQL = (
@@ -118,7 +124,13 @@ class VehicleAxis:
               
     def eliminateJump(self,p,q,defAnst):
         qnew=np.array(q);
-        dt=p[1:p.size]-p[0:p.size-1];
+        p_arr = np.asarray(p)
+        # p kann datetime64-Array sein → Differenz liefert timedelta64; in Tage als float umwandeln,
+        # damit dy/dt die übliche Einheit mm/Tag hat (wie früher mit matlabdn-Floats).
+        if np.issubdtype(p_arr.dtype, np.datetime64):
+            dt = timedelta64_to_days(np.diff(p_arr))
+        else:
+            dt = p_arr[1:p_arr.size] - p_arr[0:p_arr.size-1]
         dy=q[1:q.size]-q[0:q.size-1];
         try:
             anst = dy / dt
@@ -333,10 +345,14 @@ class VehicleAxis:
             nIndex = self.getmeterList1().getindexStartLastCycle()
             km_list = self.getmeterList1().getkm()
             dates_num = self.getmeterList1().getnDates()
-            if not km_list or not dates_num or nIndex >= len(km_list) or nIndex >= len(dates_num):
+            # dates_num kann list (leer) oder np.ndarray[datetime64[s]] sein
+            n_dates = len(dates_num) if hasattr(dates_num, "__len__") else 0
+            if not km_list or n_dates == 0 or nIndex >= len(km_list) or nIndex >= n_dates:
                 return
             tmpKm = km_list[-1] - km_list[nIndex]
-            nDays = dates_num[-1] - dates_num[nIndex]
+            # Differenz von datetime64 liefert timedelta64 → in Tage als float umwandeln
+            delta = dates_num[-1] - dates_num[nIndex]
+            nDays = float(timedelta64_to_days(delta))
             if tmpKm == 0 or nDays == 0:
                 return
             if nDays / tmpKm < self.getdaysPerKm():
@@ -352,30 +368,64 @@ class VehicleAxis:
             )
         
     def calcnDatesProg(self):
-        dkm=self.getdaysPerKm()
-        if dkm > 0:
-            if np.array(self.getmeterList1().getkmProg()).size > 0:
-                kmProg1=np.array(self.getmeterList1().getkmProg())-self.getmeterList1().getkmProg()[0] #+1
-                nDatesProg1=kmProg1*dkm + self.getmeterList1().getnDates()[-1]
-                self.getmeterList1().setnDatesProg(nDatesProg1)
-                # numerisches Datum, wann Prognosewert Warnschwelle erreicht 
-                nX=self.findXforY(np.array([nDatesProg1,self.getmeterList1().getvaluesProg()]),self.getmeterList1().getgelb_min()[-1])
-                self.getmeterList1().setgelb_min_Prog_dt(nX)
-                # numerisches Datum, wann Prognosewert Grenzwert erreicht 
-                nX=self.findXforY(np.array([nDatesProg1,self.getmeterList1().getvaluesProg()]),self.getmeterList1().getmin()[-1])
-                self.getmeterList1().setmin_Prog_dt(nX)
+        dkm = self.getdaysPerKm()
+        if dkm <= 0:
+            return
 
-            if np.array(self.getmeterList2().getkmProg()).size > 0:
-                kmProg2=np.array(self.getmeterList2().getkmProg())-self.getmeterList2().getkmProg()[0] #+1
-                nDatesProg2=kmProg2*dkm + self.getmeterList2().getnDates()[-1]
-                self.getmeterList2().setnDatesProg(nDatesProg2)
-                # numerisches Datum, wann Prognosewert Warnschwelle erreicht 
-                nX=self.findXforY(np.array([nDatesProg2,self.getmeterList2().getvaluesProg()]),self.getmeterList2().getgelb_min()[-1])
-                self.getmeterList2().setgelb_min_Prog_dt(nX)
-                
-                # numerisches Datum, wann Prognosewert Grenzwert erreicht 
-                nX=self.findXforY(np.array([nDatesProg2,self.getmeterList2().getvaluesProg()]),self.getmeterList2().getmin()[-1])
-                self.getmeterList2().setmin_Prog_dt(nX)
+        def _seconds_to_dt64(seconds):
+            """Float-Sekunden seit Unix-Epoch → np.datetime64[s] (oder NaT)."""
+            try:
+                s = float(seconds)
+            except (TypeError, ValueError):
+                return NAT
+            if not np.isfinite(s):
+                return NAT
+            return np.datetime64(int(round(s)), "s")
+
+        def _process(metList):
+            kmProg_raw = metList.getkmProg()
+            if not kmProg_raw or len(kmProg_raw) == 0:
+                return
+            n_dates = metList.getnDates()
+            if not hasattr(n_dates, "__len__") or len(n_dates) == 0:
+                return
+            last_dt = n_dates[-1]
+            if is_nat(last_dt):
+                return
+
+            # Float-Sekunden-Achse für findXforY (homogene float-Arithmetik)
+            last_seconds = float(np.asarray(last_dt, dtype="datetime64[s]").astype("int64"))
+            kmProg_rel = np.asarray(kmProg_raw, dtype=float) - float(kmProg_raw[0])
+            nDates_seconds = kmProg_rel * dkm * 86400.0 + last_seconds
+            values_arr = np.asarray(metList.getvaluesProg(), dtype=float)
+
+            # Speichern als datetime64[s]-Array
+            nDatesProg_dt64 = nDates_seconds.astype("int64").astype("datetime64[s]")
+            metList.setnDatesProg(nDatesProg_dt64)
+
+            xy = np.array([nDates_seconds, values_arr])
+            try:
+                nX_sec_gelb = self.findXforY(xy, float(metList.getgelb_min()[-1]))
+            except Exception:
+                logging.exception(
+                    "calcnDatesProg: gelb-Schwellen-Interpolation fehlgeschlagen für %s",
+                    self.getDescBogieAxis(),
+                )
+                nX_sec_gelb = None
+            metList.setgelb_min_Prog_dt(_seconds_to_dt64(nX_sec_gelb))
+
+            try:
+                nX_sec_min = self.findXforY(xy, float(metList.getmin()[-1]))
+            except Exception:
+                logging.exception(
+                    "calcnDatesProg: min-Schwellen-Interpolation fehlgeschlagen für %s",
+                    self.getDescBogieAxis(),
+                )
+                nX_sec_min = None
+            metList.setmin_Prog_dt(_seconds_to_dt64(nX_sec_min))
+
+        _process(self.getmeterList1())
+        _process(self.getmeterList2())
 
     def _prognose_insert_tuples_for_meter(self, metList, rowV):
         """Liefert die INSERT-Tupel für eine Zählerliste (gleiche Zeilen wie write_Prog_Data)."""
@@ -383,25 +433,22 @@ class VehicleAxis:
         if metList.getvaluesProg() is None or len(metList.getvaluesProg()) == 0:
             return rows
         rowZA = [metList.getzaehlerartid(), metList.getzartbez()]
-        if metList.getmin_Prog_dt() > 0:
-            min_Prog_dt = matlabdn2datetime(metList.getmin_Prog_dt())
-        else:
-            min_Prog_dt = None
-        if metList.getgelb_min_Prog_dt() > 0:
-            gelb_min_Prog_dt = matlabdn2datetime(metList.getgelb_min_Prog_dt())
-        else:
-            gelb_min_Prog_dt = None
-        if metList.getmin_Prog_km() > 0:
+        # min_Prog_dt / gelb_min_Prog_dt: np.datetime64 (oder NaT) — NaT bedeutet "kein Wert"
+        min_Prog_dt = to_python_datetime(metList.getmin_Prog_dt())
+        gelb_min_Prog_dt = to_python_datetime(metList.getgelb_min_Prog_dt())
+        if metList.getmin_Prog_km() and metList.getmin_Prog_km() > 0:
             min_Prog_km = metList.getmin_Prog_km()
         else:
             min_Prog_km = None
-        if metList.getgelb_min_Prog_km() > 0:
+        if metList.getgelb_min_Prog_km() and metList.getgelb_min_Prog_km() > 0:
             gelb_min_Prog_km = metList.getgelb_min_Prog_km()
         else:
             gelb_min_Prog_km = None
+        nDatesProg_seq = metList.getnDatesProg()
+        n_dates_prog = len(nDatesProg_seq) if hasattr(nDatesProg_seq, "__len__") else 0
         for i in range(0, len(metList.getvaluesProg())):
-            if len(metList.getnDatesProg()) > 0 and metList.getnDatesProg()[i] > 0:
-                nDateProg = matlabdn2datetime(metList.getnDatesProg()[i])
+            if n_dates_prog > 0:
+                nDateProg = to_python_datetime(nDatesProg_seq[i])
             else:
                 nDateProg = None
             if metList.getvaluesProg()[i] > 0:
