@@ -1,0 +1,23 @@
+# Zeilenenden normalisieren: Text-Dateien im Repo als LF, Checkout plattform-nativ
+* text=auto eol=lf
+
+# Explizit binaer (keine Normalisierung)
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.pdf binary
+*.docx binary
+*.xlsx binary
+*.pyc binary
+
+# Python / Config / Doku explizit text (eol=lf)
+*.py text eol=lf
+*.ini text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+
+# CSV mit Semikolon-Delimiter in utf-8-sig — als text, aber Line-Endings unberuehrt
+*.csv text

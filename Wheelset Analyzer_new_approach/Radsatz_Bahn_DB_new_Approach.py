@@ -439,6 +439,66 @@ def _plot_meter_history(
     return km_all, lkd_all
 
 
+def _km_crossing_horizontal(
+    km_pts,
+    lkd_pts,
+    y_thresh: float,
+) -> Optional[float]:
+    """
+    Erster km, an dem die Polyline (km, LKD) die Horizontale y_thresh
+    von oben kreuzt oder berührt (Verschleißabstieg oder Reprof-Sprung).
+    """
+    k = np.asarray(km_pts, dtype=float)
+    y = np.asarray(lkd_pts, dtype=float)
+    if k.size < 2 or y.size != k.size or not np.isfinite(y_thresh):
+        return None
+    for i in range(len(k) - 1):
+        y0, y1 = float(y[i]), float(y[i + 1])
+        k0, k1 = float(k[i]), float(k[i + 1])
+        if not (np.isfinite(y0) and np.isfinite(y1) and np.isfinite(k0) and np.isfinite(k1)):
+            continue
+        # Kreuzung / Berührung: Start oberhalb oder auf Schwelle, Ende auf/unter Schwelle
+        if y0 >= y_thresh and y1 <= y_thresh:
+            if abs(y0 - y1) < 1e-12:
+                return k0
+            # Vertikaler Reprof-Sprung (gleiche km): Schnitt bei diesem km
+            if abs(k1 - k0) < 1e-9:
+                return k0
+            t = (y_thresh - y0) / (y1 - y0)
+            return float(k0 + t * (k1 - k0))
+    return None
+
+
+def _gelb_marker_on_threshold(
+    met: MeterList,
+    res_m: _PrognResult,
+    gelb_min: Optional[float],
+) -> Optional[Tuple[float, float]]:
+    """
+    Gelb-Marker immer auf der gelben Warnlinie: (Schnitt-km, GELB_MIN).
+    Schnitt-km = erster Schnitt der gezeichneten Prognosekurve mit GELB_MIN.
+    """
+    if gelb_min is None or not np.isfinite(float(gelb_min)):
+        return None
+    y_gelb = float(gelb_min)
+
+    km_curve = list(met.getkmProg() or [])
+    lkd_curve = list(met.getvaluesProg() or [])
+    if len(km_curve) < 2 and res_m.km_prog_reprof and res_m.lkd_prog_reprof:
+        km_curve = list(res_m.km_prog_reprof)
+        lkd_curve = list(res_m.lkd_prog_reprof)
+
+    km_cross = _km_crossing_horizontal(km_curve, lkd_curve, y_gelb)
+    if km_cross is None:
+        if res_m.km_warn_reprof and res_m.km_warn_reprof > 0:
+            km_cross = float(res_m.km_warn_reprof)
+        elif res_m.km_warn and res_m.km_warn > 0:
+            km_cross = float(res_m.km_warn)
+        else:
+            return None
+    return float(km_cross), y_gelb
+
+
 def _plot_axis(
     tmpVehicle: VehicleAxis,
     res1_m: _PrognResult,
@@ -546,7 +606,7 @@ def _plot_axis(
         ax.axhline(m1.getgelb_min()[-1], color="gold",  lw=1.8, ls="-",  label=f"GELB_MIN ({m1.getgelb_min()[-1]:.0f} mm)")
 
     def _xy_on_reprof_curve(res_m: _PrognResult, km_thresh: Optional[float]):
-        """Schwell-km auf die gestrichelte Reprof-Kurve projizieren (für Marker/Annotation)."""
+        """Schwell-km auf die Reprof-Kurve projizieren (Grenzmarker)."""
         if (
             not res_m.km_prog_reprof
             or not res_m.lkd_prog_reprof
@@ -581,12 +641,10 @@ def _plot_axis(
         gelb1 = m1.getgelb_min()[-1] if m1.getgelb_min() else None
         min1 = m1.getmin()[-1] if m1.getmin() else None
         use_reprof = bool(res1_m.km_prog_reprof and res1_m.lkd_prog_reprof)
-        if use_reprof and res1_m.km_warn_reprof and res1_m.km_warn_reprof > 0:
-            xy = _xy_on_reprof_curve(res1_m, res1_m.km_warn_reprof)
-            if xy:
-                _annotate_point(xy[0], xy[1], "D1 Gelb (Reprof.)", "blue", "v")
-        elif res1_m.km_warn and res1_m.km_warn > 0 and gelb1 is not None:
-            _annotate_point(float(res1_m.km_warn), float(gelb1), "D1 Gelb", "blue", "v")
+        xy_gelb1 = _gelb_marker_on_threshold(m1, res1_m, gelb1)
+        if xy_gelb1:
+            label_g1 = "D1 Gelb (Reprof.)" if use_reprof and res1_m.km_warn_reprof else "D1 Gelb"
+            _annotate_point(xy_gelb1[0], xy_gelb1[1], label_g1, "blue", "v")
         if use_reprof and res1_m.km_limit_reprof and res1_m.km_limit_reprof > 0:
             xy = _xy_on_reprof_curve(res1_m, res1_m.km_limit_reprof)
             if xy:
@@ -598,12 +656,10 @@ def _plot_axis(
         gelb2 = m2.getgelb_min()[-1] if m2.getgelb_min() else None
         min2 = m2.getmin()[-1] if m2.getmin() else None
         use_reprof = bool(res2_m.km_prog_reprof and res2_m.lkd_prog_reprof)
-        if use_reprof and res2_m.km_warn_reprof and res2_m.km_warn_reprof > 0:
-            xy = _xy_on_reprof_curve(res2_m, res2_m.km_warn_reprof)
-            if xy:
-                _annotate_point(xy[0], xy[1], "D2 Gelb (Reprof.)", "green", "v")
-        elif res2_m.km_warn and res2_m.km_warn > 0 and gelb2 is not None:
-            _annotate_point(float(res2_m.km_warn), float(gelb2), "D2 Gelb", "green", "v")
+        xy_gelb2 = _gelb_marker_on_threshold(m2, res2_m, gelb2)
+        if xy_gelb2:
+            label_g2 = "D2 Gelb (Reprof.)" if use_reprof and res2_m.km_warn_reprof else "D2 Gelb"
+            _annotate_point(xy_gelb2[0], xy_gelb2[1], label_g2, "green", "v")
         if use_reprof and res2_m.km_limit_reprof and res2_m.km_limit_reprof > 0:
             xy = _xy_on_reprof_curve(res2_m, res2_m.km_limit_reprof)
             if xy:

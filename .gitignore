@@ -1,0 +1,33 @@
+# ── Python ─────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+
+# ── Logs ───────────────────────────────────────────────────────────────────
+*.log
+
+# ── Laufzeit-/Smoke-Test-Artefakte (werden bei jedem Lauf neu erzeugt) ────
+Wheelset Analyzer_new_approach/bo_radsatzdaten_prognose_recalc.csv
+Wheelset Analyzer_new_approach/plot_manifest_*.csv
+
+# ── Vergleichs-Plot-Ausgaben (viele PNGs, nicht ins Repo) ─────────────────
+Wheelset Analyzer_new_approach/prognose_vergleich_plots/
+Wheelset Analyzer_new_approach/prognose_vergleich_plots_*/
+
+# ── Oracle Connection String (enthaelt Credentials) ───────────────────────
+Wheelset Analyzer_new_approach/oracle_connect_string.txt
+
+# ── Editor-/IDE-Artefakte ──────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS-Artefakte ──────────────────────────────────────────────────────────
+Thumbs.db
+.DS_Store
+desktop.ini
