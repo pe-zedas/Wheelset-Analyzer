@@ -34,14 +34,20 @@ def test_connection(dsn: Optional[str] = None, user: Optional[str] = None,
     except ImportError as exc:
         raise OracleConnectionError(f"oracledb nicht installiert: {exc}") from exc
 
-    # Thin-Mode ist der oracledb-Default und braucht keinen expliziten
-    # init_oracle_client-Aufruf. Nur wenn ein Thick-Lib-Verzeichnis
-    # vorgegeben ist, versuchen wir den Thick-Mode.
+    # Thick-Mode versuchen (noetig fuer manche Oracle-Server-Setups).
+    # Erfolg → Thick-Mode; Exception → Thin-Mode-Fallback. Beides ist
+    # ok — wir unterdruecken nur die Konsolen-Warnung, der Rueckfall
+    # bleibt wie vor der Umstellung aktiv.
     if thick_mode_lib_dir:
         try:
             oracledb.init_oracle_client(lib_dir=thick_mode_lib_dir)
         except Exception as exc:
-            log.debug("init_oracle_client (thick): %s", exc)
+            log.debug("init_oracle_client (thick dir): %s", exc)
+    else:
+        try:
+            oracledb.init_oracle_client()
+        except Exception as exc:
+            log.debug("init_oracle_client (auto): %s", exc)
 
     try:
         if connect_string:
@@ -62,18 +68,24 @@ def test_connection(dsn: Optional[str] = None, user: Optional[str] = None,
 
 
 def _ensure_oracle_client(oracledb, thick_mode_lib_dir: Optional[str]):
-    """Thick-Mode initialisieren, falls ein Lib-Verzeichnis gesetzt ist.
+    """Thick-Mode-Initialisierung versuchen.
 
-    Im Thin-Mode (Default von oracledb) ist kein ``init_oracle_client``
-    noetig; der Aufruf wuerde dort nur eine Exception werfen, die als
-    Warnung im Log landet. Fehler im Thick-Mode-Pfad werden auf DEBUG
-    geloggt (nicht in die Konsole).
+    Mit ``thick_mode_lib_dir`` wird der Oracle Instant Client aus dem
+    angegebenen Verzeichnis geladen; ohne wird der automatische Lookup
+    probiert. Fehler sind ok — ``oracledb`` faellt dann auf Thin-Mode
+    zurueck. Wichtig: der Aufruf selbst darf NICHT entfallen, weil
+    manche Oracle-Server-Setups zwingend Thick-Mode brauchen.
     """
     if thick_mode_lib_dir:
         try:
             oracledb.init_oracle_client(lib_dir=thick_mode_lib_dir)
         except Exception as exc:
-            log.debug("init_oracle_client (thick): %s", exc)
+            log.debug("init_oracle_client (thick dir): %s", exc)
+    else:
+        try:
+            oracledb.init_oracle_client()
+        except Exception as exc:
+            log.debug("init_oracle_client (auto): %s", exc)
 
 
 def _run_sql(conn, sql: str) -> Tuple[List[str], list]:
@@ -338,12 +350,17 @@ def load_flotte_from_oracle(
     except ImportError as exc:
         raise OracleConnectionError(f"oracledb nicht installiert: {exc}") from exc
 
-    # Thin-Mode (Default) braucht kein init_oracle_client. Nur Thick-Mode.
+    # Thick-Mode versuchen; Fehler → Thin-Mode-Fallback.
     if thick_mode_lib_dir:
         try:
             oracledb.init_oracle_client(lib_dir=thick_mode_lib_dir)
         except Exception as exc:
-            log.debug("init_oracle_client (thick): %s", exc)
+            log.debug("init_oracle_client (thick dir): %s", exc)
+    else:
+        try:
+            oracledb.init_oracle_client()
+        except Exception as exc:
+            log.debug("init_oracle_client (auto): %s", exc)
 
     try:
         conn = oracledb.connect(user=user, password=password, dsn=dsn)
