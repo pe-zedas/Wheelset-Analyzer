@@ -15,6 +15,8 @@ import math
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+import numpy as np
+
 from ..data.models import Messpunkt, Messreihe, PrognoseConfig
 
 
@@ -299,35 +301,131 @@ def _ols_slope(xs: List[float], ys: List[float]) -> Tuple[float, float, float]:
     return slope, intercept, rmse
 
 
-def _theil_sen(xs: List[float], ys: List[float]
+def _theil_sen(xs: List[float], ys: List[float], alpha: float = 0.90
                 ) -> Tuple[float, float, float, float]:
-    """Theil-Sen-Steigung + 90-%-Konfidenz-Grenzen (slope_low, slope_high).
+    """Theil-Sen-Steigung + Konfidenzintervall (slope_low, slope_high).
 
-    Wenn scipy verfuegbar ist, wird scipy.stats.theilslopes genutzt.
-    Fallback: Median aller paarweisen Steigungen; CI aus 5/95-Perzentil der Paare.
+    Vollstaendig NumPy-basiert, numerisch deckungsgleich zu
+    ``scipy.stats.theilslopes(y, x, alpha=alpha, method='separate')``:
+
+    * slope = Median aller paarweisen Steigungen (fuer dx > 0)
+    * intercept = median(y) - slope * median(x)  (``separate``-Variante)
+    * Konfidenzintervall nach Sen (1968, Gl. 2.6): symmetrische Indizes
+      um den Median der sortierten Paar-Steigungen, mit Normal-Quantil
+      aus ``alpha/2`` und einer Standardabweichung, die Repeats in x
+      und y korrigiert.
+
+    Rueckgabe ist ein 4-Tupel ``(slope, intercept, slope_low, slope_high)``.
     """
-    try:
-        from scipy.stats import theilslopes  # type: ignore
-        slope, intercept, lo, hi = theilslopes(ys, xs, alpha=0.90)
-        return slope, intercept, lo, hi
-    except Exception:
-        pass
-    slopes = []
-    for i in range(len(xs)):
-        for j in range(i + 1, len(xs)):
-            dx = xs[j] - xs[i]
-            if dx != 0:
-                slopes.append((ys[j] - ys[i]) / dx)
-    if not slopes:
+    xs_arr = np.asarray(xs, dtype=float)
+    ys_arr = np.asarray(ys, dtype=float)
+    n = len(xs_arr)
+    if n < 2:
         return 0.0, 0.0, 0.0, 0.0
+
+    # Paarweise Steigungen fuer alle (i, j) mit x[j] > x[i].
+    dx = xs_arr[:, None] - xs_arr
+    dy = ys_arr[:, None] - ys_arr
+    mask = dx > 0
+    if not mask.any():
+        return 0.0, 0.0, 0.0, 0.0
+    slopes = dy[mask] / dx[mask]
     slopes.sort()
-    slope = slopes[len(slopes) // 2]
-    # Intercept via Median
-    intercepts = sorted(y - slope * x for x, y in zip(xs, ys))
-    intercept = intercepts[len(intercepts) // 2]
-    lo = _percentile(slopes, 0.05)
-    hi = _percentile(slopes, 0.95)
-    return slope, intercept, lo, hi
+    med_slope = float(np.median(slopes))
+    med_inter = float(np.median(ys_arr) - med_slope * np.median(xs_arr))
+
+    # Konfidenzintervall (Sen 1968, 2.6). alpha ist symmetrisch um 0.5.
+    a = alpha
+    if a > 0.5:
+        a = 1.0 - a
+    # Normal-Quantil ohne scipy: inverse Standardnormal via Acklam/Beasley–Springer-
+    # Approximation (Fehler < 4.5e-4). Fuer die typischen alpha-Werte
+    # (0.80, 0.90, 0.95, 0.99) bringt das <<1e-6 Abweichung vom scipy-Wert.
+    z = _norm_ppf(a / 2.0)
+    nxreps = _count_repeats(xs_arr)
+    nyreps = _count_repeats(ys_arr)
+    nt = len(slopes)
+    sigsq = (
+        n * (n - 1) * (2 * n + 5)
+        - sum(k * (k - 1) * (2 * k + 5) for k in nxreps)
+        - sum(k * (k - 1) * (2 * k + 5) for k in nyreps)
+    ) / 18.0
+    try:
+        sigma = math.sqrt(max(sigsq, 0.0))
+        Ru = min(int(round((nt - z * sigma) / 2.0)), nt - 1)
+        Rl = max(int(round((nt + z * sigma) / 2.0)) - 1, 0)
+        lo = float(slopes[Rl])
+        hi = float(slopes[Ru])
+    except (ValueError, IndexError):
+        lo = hi = float("nan")
+    return med_slope, med_inter, lo, hi
+
+
+def _count_repeats(a: "np.ndarray") -> List[int]:
+    """Multiplizitaet jedes mehrfach auftretenden Werts in ``a``.
+
+    Entspricht ``scipy.stats._stats_py._find_repeats(a)[1]``: Rueckgabe
+    sind nur die Zaehlungen jener Werte, die mindestens zweimal
+    vorkommen. Reine ``numpy``-Umsetzung.
+    """
+    if len(a) == 0:
+        return []
+    sorted_a = np.sort(a)
+    # Position jedes Blockbeginns
+    diffs = np.diff(sorted_a) != 0
+    idx = np.concatenate(([0], np.where(diffs)[0] + 1, [len(sorted_a)]))
+    counts = np.diff(idx)
+    return [int(c) for c in counts if c > 1]
+
+
+# Inverse Standard-Normal (Acklam-Approximation, ohne scipy).
+_ACKLAM_A = [-3.969683028665376e+01, 2.209460984245205e+02,
+             -2.759285104469687e+02, 1.383577518672690e+02,
+             -3.066479806614716e+01, 2.506628277459239e+00]
+_ACKLAM_B = [-5.447609879822406e+01, 1.615858368580409e+02,
+             -1.556989798598866e+02, 6.680131188771972e+01,
+             -1.328068155288572e+01]
+_ACKLAM_C = [-7.784894002430293e-03, -3.223964580411365e-01,
+             -2.400758277161838e+00, -2.549732539343734e+00,
+             4.374664141464968e+00, 2.938163982698783e+00]
+_ACKLAM_D = [7.784695709041462e-03, 3.224671290700398e-01,
+             2.445134137142996e+00, 3.754408661907416e+00]
+
+
+def _norm_ppf(p: float) -> float:
+    """Inverse Standardnormal-CDF (Acklam-Approximation). Ersatz fuer
+    ``scipy.stats.norm.ppf``. Maximaler Fehler ca. 1.15e-9 im zentralen
+    Bereich; weit genauer als der Rundungsschritt im CI-Index."""
+    if p <= 0.0:
+        return float("-inf")
+    if p >= 1.0:
+        return float("inf")
+    plow = 0.02425
+    phigh = 1.0 - plow
+    if p < plow:
+        q = math.sqrt(-2.0 * math.log(p))
+        return (
+            (((((_ACKLAM_C[0] * q + _ACKLAM_C[1]) * q + _ACKLAM_C[2]) * q +
+               _ACKLAM_C[3]) * q + _ACKLAM_C[4]) * q + _ACKLAM_C[5]) /
+            ((((_ACKLAM_D[0] * q + _ACKLAM_D[1]) * q + _ACKLAM_D[2]) * q +
+              _ACKLAM_D[3]) * q + 1.0)
+        )
+    if p <= phigh:
+        q = p - 0.5
+        r = q * q
+        return (
+            (((((_ACKLAM_A[0] * r + _ACKLAM_A[1]) * r + _ACKLAM_A[2]) * r +
+               _ACKLAM_A[3]) * r + _ACKLAM_A[4]) * r + _ACKLAM_A[5]) * q /
+            (((((_ACKLAM_B[0] * r + _ACKLAM_B[1]) * r + _ACKLAM_B[2]) * r +
+               _ACKLAM_B[3]) * r + _ACKLAM_B[4]) * r + 1.0)
+        )
+    q = math.sqrt(-2.0 * math.log(1.0 - p))
+    return -(
+        (((((_ACKLAM_C[0] * q + _ACKLAM_C[1]) * q + _ACKLAM_C[2]) * q +
+           _ACKLAM_C[3]) * q + _ACKLAM_C[4]) * q + _ACKLAM_C[5]) /
+        ((((_ACKLAM_D[0] * q + _ACKLAM_D[1]) * q + _ACKLAM_D[2]) * q +
+          _ACKLAM_D[3]) * q + 1.0)
+    )
 
 
 def _last_positive_jump_index(pts: List[Messpunkt], diff_lkd: float = 10.0) -> int:
