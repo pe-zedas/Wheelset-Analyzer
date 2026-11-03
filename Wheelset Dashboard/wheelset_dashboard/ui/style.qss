@@ -1,0 +1,113 @@
+/* Wheelset Dashboard — Light Theme (QSS) */
+
+QWidget {
+    background-color: #F5F6F8;
+    color: #1A1C20;
+    font-family: "Segoe UI", "Inter", sans-serif;
+    font-size: 13px;
+}
+
+QMainWindow, QDialog {
+    background-color: #F5F6F8;
+}
+
+/* Side-Nav */
+#SideNav {
+    background-color: #FFFFFF;
+    border-right: 1px solid #E2E4EA;
+}
+#SideNav QLabel.NavSection {
+    color: #8A8F99;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 14px 14px 4px;
+    text-transform: uppercase;
+}
+#SideNav QPushButton {
+    background: transparent;
+    border: none;
+    text-align: left;
+    padding: 7px 14px;
+    color: #4A4E57;
+    border-radius: 0;
+}
+#SideNav QPushButton:hover {
+    background-color: #F0F2F6;
+}
+#SideNav QPushButton[active="true"] {
+    background-color: #E8F0FD;
+    color: #185FA5;
+    font-weight: 500;
+    border-left: 3px solid #378ADD;
+    padding-left: 11px;
+}
+
+/* Breadcrumb */
+#Breadcrumb {
+    color: #6B6F78;
+    font-size: 12px;
+    padding: 4px 2px;
+}
+
+/* KPI-Karten */
+QFrame.KpiCard {
+    background-color: #FFFFFF;
+    border-radius: 8px;
+    border: 1px solid #E2E4EA;
+    padding: 10px 14px;
+}
+QFrame.KpiCardWarn { border-left: 3px solid #F2B82B; }
+QFrame.KpiCardDanger { border-left: 3px solid #E24B4A; }
+QLabel.KpiLabel { color: #8A8F99; font-size: 10px; }
+QLabel.KpiValue { color: #1A1C20; font-size: 15px; font-weight: 500; }
+QLabel.KpiSub   { color: #6B6F78; font-size: 10px; }
+QLabel.KpiValueWarn { color: #854F0B; }
+QLabel.KpiValueDanger { color: #A32D2D; }
+
+/* Karte / Panel */
+QFrame.Panel {
+    background-color: #FFFFFF;
+    border: 1px solid #E2E4EA;
+    border-radius: 12px;
+}
+QLabel.PanelTitle { color: #4A4E57; font-size: 12px; padding: 4px 2px; }
+
+/* Tabellen */
+QTableWidget, QTableView {
+    background: transparent;
+    border: none;
+    gridline-color: transparent;
+    selection-background-color: #E8F0FD;
+    selection-color: #185FA5;
+    alternate-background-color: #FAFBFC;
+}
+QHeaderView::section {
+    background: transparent;
+    color: #8A8F99;
+    border: none;
+    border-bottom: 1px solid #E2E4EA;
+    padding: 4px 8px;
+    font-weight: 500;
+    font-size: 11px;
+    text-transform: uppercase;
+}
+QTableWidget::item { padding: 4px 8px; }
+
+/* Buttons */
+QPushButton {
+    background-color: #FFFFFF;
+    border: 1px solid #D4D6DC;
+    border-radius: 6px;
+    padding: 5px 12px;
+}
+QPushButton:hover { background-color: #F0F2F6; }
+QPushButton:pressed { background-color: #E2E4EA; }
+QPushButton[primary="true"] {
+    background-color: #378ADD;
+    color: #FFFFFF;
+    border-color: #378ADD;
+}
+QPushButton[primary="true"]:hover { background-color: #2A79C9; }
+
+/* Statusleiste */
+QStatusBar { background: #FFFFFF; border-top: 1px solid #E2E4EA; color: #6B6F78; }

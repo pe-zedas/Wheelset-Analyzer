@@ -19,6 +19,10 @@ Wheelset Analyzer_new_approach/prognose_vergleich_plots_*/
 
 # ── Oracle Connection String (enthaelt Credentials) ───────────────────────
 Wheelset Analyzer_new_approach/oracle_connect_string.txt
+Wheelset Dashboard/config/oracle_connect_string.txt
+
+# ── Zwischenablagen / Scratch-Artefakte ───────────────────────────────────
+Wheelset Dashboard/Image_Radachse_clean.jpg
 
 # ── Editor-/IDE-Artefakte ──────────────────────────────────────────────────
 .vscode/

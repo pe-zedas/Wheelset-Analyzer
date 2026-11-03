@@ -18,6 +18,7 @@ from prognosis_new_core import (
     QUALITY_OK,
     _PrognResult,
     _fit_theilsen,
+    _clamp_slope_bounds,
     _outlier_filter_iqr,
     get_prognosis_params,
 )
@@ -174,6 +175,9 @@ def _slopes_for_plot_ki(met: MeterList) -> Tuple[float, float, float]:
     if len(km) >= max(2, prm.min_points_fit):
         try:
             slope, _, slope_low, slope_high, _ = _fit_theilsen(km, lkd, prm.ci_alpha)
+            # Clamp gegen Pairwise-Ausreisser bei kleinen n (siehe
+            # prognosis_new_core._clamp_slope_bounds).
+            slope_low, slope_high = _clamp_slope_bounds(slope, slope_low, slope_high)
             return slope, slope_low, slope_high
         except Exception:
             pass

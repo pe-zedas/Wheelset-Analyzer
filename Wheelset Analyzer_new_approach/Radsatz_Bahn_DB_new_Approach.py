@@ -71,6 +71,7 @@ import matplotlib.pyplot as plt
 from prognosis_new_core import (
     _PrognResult,
     _calc_prognosis_axis,
+    _calc_prognosis_axis_pair,
     prognosis_params_from_radsatz_config,
     set_prognosis_params,
 )
@@ -1020,8 +1021,13 @@ def main() -> None:
                                 n2 = getStartIndexLastCycle(wm2.getkm(), wm2.getvalues(), diffLKD)
                                 wm1.setindexStartLastCycle(n1)
                                 wm2.setindexStartLastCycle(n2)
-                                res1_m = _calc_prognosis_axis(wm1, key + "_LKD1", nKm)
-                                res2_m = _calc_prognosis_axis(wm2, key + "_LKD2", nKm)
+                                # Achsen-Pair: beide Räder gemeinsam auswerten, damit das
+                                # Konfidenzintervall achsenweit konsistent wird (pooled, wenn
+                                # Streuung ähnlich; individuell, wenn asymmetrisch).
+                                # Inkl. CI-Clamp gegen absurde Pairwise-Grenzen.
+                                res1_m, res2_m = _calc_prognosis_axis_pair(
+                                    wm1, wm2, key + "_LKD1", key + "_LKD2", nKm,
+                                )
                                 if cfg.progn_new_baureihe_fallback and not (wm1.getkmProg() and wm2.getkmProg()):
                                     fb1 = _build_theil_baureihe_fallback(
                                         wm1,

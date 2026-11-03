@@ -1,0 +1,105 @@
+# Kundenprofil VGF (Legacy-Schema, 21 Spalten)
+name: vgf
+description: Verkehrsgesellschaft Frankfurt - Legacy-Schema
+
+csv:
+  delimiter: ";"
+  encoding: "utf-8-sig"
+  date_format: "%Y-%m-%d %H:%M:%S"
+  decimal: "."
+
+# CSV-Spalte -> interner kanonischer Name
+columns_raw:
+  TOPEINHEITID: topeinheit_id
+  TOPEINHEITBEZEICHNUNG: topeinheit_bez
+  DGEINHEITID: dg_id
+  DGBEZEICHNUNG: dg_bez
+  DGEINBAUPOS: dg_einbaupos
+  RSEINHEITID: rs_id
+  RSBEZEICHNUNG: rs_bez
+  RSEINBAUPOS: rs_einbaupos
+  EINBAU: einbau
+  AUSBAU: ausbau
+  AKTUELL: aktuell
+  ZAEHLERARTID: zaehlerart_id
+  ZARTBEZ: zartbez
+  STAND: stand
+  DATUM: datum
+  MIN: min_val
+  MAX: max_val
+  GELB_MIN: gelb_min
+  GELB_MAX: gelb_max
+  LAUFLEISTUNG: laufleistung
+  LETZTEAENDZEIT: letzteaendzeit
+
+columns_prognose:
+  TOPEINHEITID: topeinheit_id
+  DGEINHEITID: dg_id
+  RSEINHEITID: rs_id
+  ZARTBEZ: zartbez
+  STAND: stand
+  DATUM: datum
+  LAUFLEISTUNG: laufleistung
+  LETZTEAENDZEIT: letzteaendzeit
+  KM_WARNWERT: km_warnwert
+  DATUM_WARNWERT: datum_warnwert
+  KM_GRENZWERT: km_grenzwert
+  DATUM_GRENZWERT: datum_grenzwert
+  AKTUELL: aktuell
+
+# Pflichtfelder je Messpunkt — fehlt eines, wird der Punkt verworfen
+required_measurement_fields:
+  base: [datum, stand]
+  prognosis_eligible: [datum, stand, laufleistung, min_val, max_val, gelb_min]
+
+# Hierarchie-Tiefe
+hierarchy_depth: 4   # bis Radsatz / Rad
+
+# ZARTBEZ-Katalog: kanonische Messgröße -> Patterns + Rad-Seite
+measurement_catalog:
+  LKD:
+    patterns:
+      - regex: "^Rad-Laufkreisdurchmesser-1$"
+        side: left
+      - regex: "^Rad-Laufkreisdurchmesser-2$"
+        side: right
+    unit: mm
+    direction: decreasing    # Verschleiss -> LKD faellt
+    prognosis: true
+
+  SPURKRANZDICKE_SD:
+    patterns:
+      - regex: "^Rad-Spurkranzstärke-1$"
+        side: left
+      - regex: "^Rad-Spurkranzstärke-2$"
+        side: right
+    unit: mm
+    direction: decreasing
+    prognosis: false
+
+  SPURKRANZHOEHE_SH:
+    patterns:
+      - regex: "^Rad-Spurkranzhöhe-1$"
+        side: left
+      - regex: "^Rad-Spurkranzhöhe-2$"
+        side: right
+    unit: mm
+    direction: both          # Sh ist beidseitig begrenzt (MIN 19 / MAX 24 bei VGF)
+    prognosis: false
+
+  # Stichmass wird je Achse (nicht je Rad) gemessen – Seite "unspecified".
+  SPURMASS_SR:
+    patterns:
+      - regex: "^Rad-Stichma(ss|ß)\\s*\\(Spurma(ss|ß)\\)$"
+        side: unspecified
+    unit: mm
+    direction: both
+    prognosis: false
+
+  STICHMASS_ABSTAND:
+    patterns:
+      - regex: "^Rad-Stichma(ss|ß)\\s*\\(Abstandsma(ss|ß)\\)$"
+        side: unspecified
+    unit: mm
+    direction: both
+    prognosis: false

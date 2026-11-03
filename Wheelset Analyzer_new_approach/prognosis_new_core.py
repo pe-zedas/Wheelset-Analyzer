@@ -73,6 +73,43 @@ QUALITY_LOW = "LOW"
 QUALITY_INSUFFICIENT = "INSUFFICIENT"
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CI-Verbesserungen (Dashboard-kompatibel):
+# - Pooled Achsen-CI, wenn Residuen-RMSE beider Räder ähnlich (Verhältnis ≤ 2).
+# - Clamp der CI-Grenzen auf max. ±CI_CLAMP_FACTOR × |slope|, damit absurde
+#   Werte aus Theil-Sen bei kleinen n (dkm=0-Paare → fast senkrechte paarweise
+#   Steigungen) nicht in die konservativen Schwellen laufen.
+# Beides spiegelt die Logik aus wheelset_dashboard/logic/prognose.py wider.
+# ─────────────────────────────────────────────────────────────────────────────
+POOL_RMSE_RATIO = 2.0     # beide Räder gelten als "ähnlich streuend", wenn
+                          # max(rmse)/min(rmse) ≤ dieser Faktor
+CI_CLAMP_FACTOR = 3.0     # CI-Halbbreite = max. CI_CLAMP_FACTOR × |slope|
+
+
+def _clamp_slope_bounds(
+    slope: float,
+    slope_low: float,
+    slope_high: float,
+    max_half: Optional[float] = None,
+) -> Tuple[float, float]:
+    """Klemmt (slope_low, slope_high) um ``slope`` auf eine Halbbreite.
+
+    Default: ``max_half = CI_CLAMP_FACTOR × |slope|``. Für pooled Achsen-CI
+    wird ``max_half`` explizit mit dem Mittelwert beider Rad-|slope|
+    übergeben, damit beide Räder dieselbe Band-Breite behalten.
+    Der Punkt-Schätzer bleibt immer innerhalb des Bands.
+    """
+    if max_half is None:
+        if slope == 0.0:
+            return slope_low, slope_high
+        max_half = CI_CLAMP_FACTOR * abs(slope)
+    lo_c = max(slope - max_half, slope_low)
+    hi_c = min(slope + max_half, slope_high)
+    lo_c = min(lo_c, slope)
+    hi_c = max(hi_c, slope)
+    return lo_c, hi_c
+
+
 @dataclass
 class _PrognResult:
     """Zwischenergebnis der Prognoseberechnung für eine Zählerliste."""
@@ -332,7 +369,21 @@ def _calc_prognosis_axis(
     met: MeterList,
     axis_key: str,
     n_km_horizon: int,
+    ci_override: Optional[Tuple[float, float]] = None,
+    ci_clamp_max_half: Optional[float] = None,
 ) -> _PrognResult:
+    """Berechnet die Prognose für ein Rad.
+
+    Zusätzliche Parameter (für Achsen-Pooling, siehe
+    :func:`_calc_prognosis_axis_pair`):
+
+    - ``ci_override``: optionale (slope_low, slope_high), die nach dem
+      Theil-Sen-Fit die eigenen CI-Grenzen ersetzen (für gepooltes CI
+      beider Räder einer Achse).
+    - ``ci_clamp_max_half``: optionale explizite Halbbreite für den
+      CI-Clamp. Default: ``CI_CLAMP_FACTOR × |slope|``. Für pooled CI
+      wird hier der Mittelwert beider Rad-|slope| übergeben.
+    """
     prm = get_prognosis_params()
     nIndex = met.getindexStartLastCycle()
 
@@ -428,6 +479,17 @@ def _calc_prognosis_axis(
 
     slope, intercept, slope_low, slope_high, rmse_linear = _fit_theilsen(
         km_clean, lkd_clean, prm.ci_alpha
+    )
+
+    # ── CI-Verbesserungen ────────────────────────────────────────────────
+    # 1) Falls ein gepooltes Achsen-CI übergeben wurde (siehe
+    #    _calc_prognosis_axis_pair), überschreiben dessen Grenzen
+    #    die eigenen Theil-Sen-Grenzen.
+    if ci_override is not None:
+        slope_low, slope_high = ci_override
+    # 2) Clamp gegen Pairwise-Ausreisser (max. CI_CLAMP_FACTOR × |slope|).
+    slope_low, slope_high = _clamp_slope_bounds(
+        slope, slope_low, slope_high, max_half=ci_clamp_max_half,
     )
 
     last_km = float(km_cycle[-1])
@@ -592,3 +654,137 @@ def _calc_prognosis_axis(
         lkd_prog_reprof=lkd_prog_reprof,
         prog_curve_uses_reprof=prog_curve_uses_reprof,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Achsen-Pair-Prognose mit gepooltem CI (Dashboard-kompatibel)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _fit_residuals_rmse(
+    met: MeterList, axis_key: str
+) -> Optional[Tuple[np.ndarray, np.ndarray, float, float, float]]:
+    """Hilfs-Fit zur Residuen-Berechnung (für Pool-Entscheidung).
+
+    Liefert (km_clean, residuals, slope, intercept, rmse) oder None, wenn
+    die Datenlage für den Fit nicht reicht. Verwendet dieselben Filter
+    wie :func:`_calc_prognosis_axis`.
+    """
+    prm = get_prognosis_params()
+    nIndex = met.getindexStartLastCycle()
+    km_all = np.array(met.getkm(), dtype=float)
+    lkd_all = np.array(met.getvalues(), dtype=float)
+    km_cycle = km_all[nIndex:]
+    lkd_cycle = lkd_all[nIndex:]
+    sort_idx = np.argsort(km_cycle)
+    km_cycle = km_cycle[sort_idx]
+    lkd_cycle = lkd_cycle[sort_idx]
+    # Sub-Zyklus-Erkennung (konsistent zum Haupt-Fit)
+    reprof_params = get_reprofiling_params(axis_key)
+    if reprof_params is not None and len(km_cycle) >= 3:
+        last_reprof = _find_last_reprofiling_in_cycle(km_cycle, lkd_cycle, reprof_params)
+        if last_reprof is not None:
+            sub_km = km_cycle[last_reprof + 1:]
+            if len(sub_km) >= prm.min_points_fit:
+                km_cycle = sub_km
+                lkd_cycle = lkd_cycle[last_reprof + 1:]
+    if len(km_cycle) < prm.min_points_fit:
+        return None
+    km_clean, lkd_clean, _ = _outlier_filter_iqr(
+        km_cycle, lkd_cycle, prm.iqr_factor, axis_key,
+    )
+    if len(km_clean) < prm.min_points_fit:
+        return None
+    slope, intercept, _lo, _hi, rmse = _fit_theilsen(km_clean, lkd_clean, prm.ci_alpha)
+    residuals = lkd_clean - (slope * km_clean + intercept)
+    return km_clean, residuals, slope, intercept, rmse
+
+
+def _calc_prognosis_axis_pair(
+    met1: MeterList,
+    met2: MeterList,
+    axis_key1: str,
+    axis_key2: str,
+    n_km_horizon: int,
+) -> Tuple[_PrognResult, _PrognResult]:
+    """Prognose für beide Räder einer Achse mit achsenweit konsistentem CI.
+
+    Vorgehen (identisch zur Dashboard-Logik):
+
+    1. Pre-Fit jedes Rads einzeln → eigene Theil-Sen-Steigung + Residuen.
+    2. RMSE-Vergleich der Rad-Residuen. Nur wenn das Verhältnis
+       ≤ ``POOL_RMSE_RATIO`` ist, werden die Residuen beider Räder gepoolt
+       und daraus eine gemeinsame CI-Steigungs-Grenze berechnet
+       (symmetrisches, robusteres Band).
+    3. Wenn asymmetrisch gestreut → jedes Rad behält sein eigenes CI
+       (asymmetrische Streuung bleibt sichtbar).
+    4. CI-Clamp (max. ±CI_CLAMP_FACTOR × |slope|; im Pooled-Fall gegen
+       den Mittel-|slope| beider Räder → symmetrische Bandbreite).
+
+    Rückgabe: Ergebnisse beider Räder. Alle `MeterList`-Setter werden
+    ganz normal von ``_calc_prognosis_axis`` befüllt.
+    """
+    pre1 = _fit_residuals_rmse(met1, axis_key1)
+    pre2 = _fit_residuals_rmse(met2, axis_key2)
+
+    pooled_bounds: Optional[Tuple[float, float]] = None
+    clamp_max_half: Optional[float] = None
+
+    if pre1 is not None and pre2 is not None:
+        km1, res1, slope1, _i1, rmse1 = pre1
+        km2, res2, slope2, _i2, rmse2 = pre2
+        lo = min(rmse1, rmse2)
+        hi = max(rmse1, rmse2)
+        if lo > 1e-9 and (hi / lo) <= POOL_RMSE_RATIO:
+            # Pooled Theil-Sen auf (km, residuum) → gemeinsame Streuung
+            # der Steigung um 0.
+            km_pool = np.concatenate([km1, km2])
+            res_pool = np.concatenate([res1, res2])
+            try:
+                pr = theilslopes(y=res_pool, x=km_pool, alpha=get_prognosis_params().ci_alpha)
+                pooled_lo = float(pr.low_slope)
+                pooled_hi = float(pr.high_slope)
+                # Band wird in _calc_prognosis_axis um das eigene slope
+                # verschoben: slope ± pooled_bounds.  Da _calc_prognosis_axis
+                # das Override direkt als slope_low/slope_high einsetzt,
+                # schieben wir hier schon pro Rad die Pooled-Residuen-Grenzen
+                # auf das jeweilige slope auf.
+                pooled_bounds = (pooled_lo, pooled_hi)
+                clamp_max_half = CI_CLAMP_FACTOR * 0.5 * (abs(slope1) + abs(slope2))
+                logging.info(
+                    "Pooled Achsen-CI (RMSE %.3f / %.3f, Verh. %.2f): "
+                    "slope_low_add=%.5f  slope_high_add=%.5f | %s",
+                    rmse1, rmse2, hi / lo, pooled_lo, pooled_hi, axis_key1,
+                )
+            except Exception as exc:
+                logging.warning("Pooled Theil-Sen fehlgeschlagen: %s | %s", exc, axis_key1)
+        else:
+            logging.info(
+                "Kein Pooling (RMSE %.3f / %.3f, Verh. %.2f > %.1f): "
+                "individuelles CI je Rad | %s",
+                rmse1, rmse2, (hi / lo if lo > 0 else float("inf")),
+                POOL_RMSE_RATIO, axis_key1,
+            )
+
+    # Pooled-Werte sind Steigungs-Offsets um 0 (Residuen-Fit). Pro Rad
+    # werden sie auf das Rad-eigene slope aufgeschlagen. _calc_prognosis_axis
+    # verwendet ci_override aber direkt als (slope_low, slope_high) — also
+    # muss die Addition hier passieren.
+    def _pooled_override_for(slope_self: float) -> Optional[Tuple[float, float]]:
+        if pooled_bounds is None:
+            return None
+        return (slope_self + pooled_bounds[0], slope_self + pooled_bounds[1])
+
+    slope1_est = pre1[2] if pre1 is not None else 0.0
+    slope2_est = pre2[2] if pre2 is not None else 0.0
+
+    res1 = _calc_prognosis_axis(
+        met1, axis_key1, n_km_horizon,
+        ci_override=_pooled_override_for(slope1_est),
+        ci_clamp_max_half=clamp_max_half,
+    )
+    res2 = _calc_prognosis_axis(
+        met2, axis_key2, n_km_horizon,
+        ci_override=_pooled_override_for(slope2_est),
+        ci_clamp_max_half=clamp_max_half,
+    )
+    return res1, res2
