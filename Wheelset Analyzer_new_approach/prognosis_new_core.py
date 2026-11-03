@@ -1,22 +1,21 @@
 """
 Gemeinsamer Kern: IQR-Filter, Theil-Sen, optional Power-Law, Zyklus-Prognose (MeterList).
+
+Theil-Sen laeuft reine NumPy, numerisch deckungsgleich zur
+``scipy.stats.theilslopes``-Variante mit ``method='separate'`` (siehe
+``_theilslopes``). ``scipy.optimize.curve_fit`` wird nur fuer die
+optionale Power-Law-Alternative benoetigt und daher **lazy** geladen:
+Wer nur die Standard-Prognose (Theil-Sen) nutzt, braucht kein scipy.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import List, NamedTuple, Optional, Tuple
 
 import numpy as np
-
-try:
-    from scipy.stats import theilslopes
-    from scipy.optimize import curve_fit as _scipy_curve_fit
-except ImportError as _exc:
-    raise ImportError(
-        "scipy nicht gefunden. Installiere mit: python -m pip install scipy"
-    ) from _exc
 
 from MeterList import MeterList
 from reprof_learning import ReprofilingParams, get_reprofiling_params, is_reprofiling
@@ -163,6 +162,131 @@ def _outlier_filter_iqr(
     return km[mask], lkd[mask], n_removed
 
 
+class _TheilResult(NamedTuple):
+    slope: float
+    intercept: float
+    low_slope: float
+    high_slope: float
+
+
+# Inverse Standard-Normal (Acklam-Approximation, ohne scipy).
+_ACKLAM_A = [-3.969683028665376e+01, 2.209460984245205e+02,
+             -2.759285104469687e+02, 1.383577518672690e+02,
+             -3.066479806614716e+01, 2.506628277459239e+00]
+_ACKLAM_B = [-5.447609879822406e+01, 1.615858368580409e+02,
+             -1.556989798598866e+02, 6.680131188771972e+01,
+             -1.328068155288572e+01]
+_ACKLAM_C = [-7.784894002430293e-03, -3.223964580411365e-01,
+             -2.400758277161838e+00, -2.549732539343734e+00,
+             4.374664141464968e+00, 2.938163982698783e+00]
+_ACKLAM_D = [7.784695709041462e-03, 3.224671290700398e-01,
+             2.445134137142996e+00, 3.754408661907416e+00]
+
+
+def _norm_ppf(p: float) -> float:
+    """Inverse Standardnormal-CDF (Acklam-Approximation). Ersetzt
+    ``scipy.stats.norm.ppf`` im CI-Index der Theil-Sen-Schranken.
+    Max. Fehler ca. 1.15e-9 im zentralen Bereich — weit genauer als
+    der nachfolgende ``round()``-Schritt."""
+    if p <= 0.0:
+        return float("-inf")
+    if p >= 1.0:
+        return float("inf")
+    plow = 0.02425
+    phigh = 1.0 - plow
+    if p < plow:
+        q = math.sqrt(-2.0 * math.log(p))
+        return (
+            (((((_ACKLAM_C[0] * q + _ACKLAM_C[1]) * q + _ACKLAM_C[2]) * q +
+               _ACKLAM_C[3]) * q + _ACKLAM_C[4]) * q + _ACKLAM_C[5]) /
+            ((((_ACKLAM_D[0] * q + _ACKLAM_D[1]) * q + _ACKLAM_D[2]) * q +
+              _ACKLAM_D[3]) * q + 1.0)
+        )
+    if p <= phigh:
+        q = p - 0.5
+        r = q * q
+        return (
+            (((((_ACKLAM_A[0] * r + _ACKLAM_A[1]) * r + _ACKLAM_A[2]) * r +
+               _ACKLAM_A[3]) * r + _ACKLAM_A[4]) * r + _ACKLAM_A[5]) * q /
+            (((((_ACKLAM_B[0] * r + _ACKLAM_B[1]) * r + _ACKLAM_B[2]) * r +
+               _ACKLAM_B[3]) * r + _ACKLAM_B[4]) * r + 1.0)
+        )
+    q = math.sqrt(-2.0 * math.log(1.0 - p))
+    return -(
+        (((((_ACKLAM_C[0] * q + _ACKLAM_C[1]) * q + _ACKLAM_C[2]) * q +
+           _ACKLAM_C[3]) * q + _ACKLAM_C[4]) * q + _ACKLAM_C[5]) /
+        ((((_ACKLAM_D[0] * q + _ACKLAM_D[1]) * q + _ACKLAM_D[2]) * q +
+          _ACKLAM_D[3]) * q + 1.0)
+    )
+
+
+def _count_repeats(a: np.ndarray) -> List[int]:
+    """Multiplizitaet jedes mindestens zweimal vorkommenden Wertes in
+    ``a``. Entspricht ``scipy.stats._stats_py._find_repeats(a)[1]``."""
+    if len(a) == 0:
+        return []
+    sa = np.sort(a)
+    diffs = np.diff(sa) != 0
+    idx = np.concatenate(([0], np.where(diffs)[0] + 1, [len(sa)]))
+    counts = np.diff(idx)
+    return [int(c) for c in counts if c > 1]
+
+
+def theilslopes(y, x=None, alpha: float = 0.95) -> _TheilResult:
+    """Theil-Sen-Steigung + Konfidenzintervall, numerisch deckungsgleich
+    zu ``scipy.stats.theilslopes(y, x, alpha=alpha, method='separate')``.
+
+    * ``slope`` = Median aller paarweisen Steigungen (fuer dx > 0)
+    * ``intercept`` = ``median(y) - slope * median(x)``  (method='separate')
+    * CI nach Sen (1968, Gl. 2.6) mit Repeats-Korrektur in x und y;
+      Normal-Quantil per Acklam-Approximation (ohne scipy).
+
+    Rueckgabe ist ein NamedTuple mit den Attributen ``slope``,
+    ``intercept``, ``low_slope`` und ``high_slope`` — kompatibel zum
+    scipy-``TheilslopesResult``.
+    """
+    y_arr = np.asarray(y, dtype=float).ravel()
+    if x is None:
+        x_arr = np.arange(len(y_arr), dtype=float)
+    else:
+        x_arr = np.asarray(x, dtype=float).ravel()
+    n = len(x_arr)
+    if n < 2 or len(y_arr) != n:
+        return _TheilResult(0.0, 0.0, 0.0, 0.0)
+
+    dx = x_arr[:, None] - x_arr
+    dy = y_arr[:, None] - y_arr
+    mask = dx > 0
+    if not mask.any():
+        return _TheilResult(0.0, 0.0, 0.0, 0.0)
+    slopes = dy[mask] / dx[mask]
+    slopes.sort()
+    med_slope = float(np.median(slopes))
+    med_inter = float(np.median(y_arr) - med_slope * np.median(x_arr))
+
+    a = alpha
+    if a > 0.5:
+        a = 1.0 - a
+    z = _norm_ppf(a / 2.0)
+    nxreps = _count_repeats(x_arr)
+    nyreps = _count_repeats(y_arr)
+    nt = len(slopes)
+    sigsq = (
+        n * (n - 1) * (2 * n + 5)
+        - sum(k * (k - 1) * (2 * k + 5) for k in nxreps)
+        - sum(k * (k - 1) * (2 * k + 5) for k in nyreps)
+    ) / 18.0
+    try:
+        sigma = math.sqrt(max(sigsq, 0.0))
+        Ru = min(int(round((nt - z * sigma) / 2.0)), nt - 1)
+        Rl = max(int(round((nt + z * sigma) / 2.0)) - 1, 0)
+        lo = float(slopes[Rl])
+        hi = float(slopes[Ru])
+    except (ValueError, IndexError):
+        lo = hi = float("nan")
+    return _TheilResult(med_slope, med_inter, lo, hi)
+
+
 def _fit_theilsen(
     km: np.ndarray,
     lkd: np.ndarray,
@@ -184,6 +308,18 @@ def _fit_powerlaw(
     last_km: float,
     last_lkd: float,
 ) -> Optional[Tuple[float, float, float]]:
+    """Optionale Alternative zu Theil-Sen. Benoetigt
+    ``scipy.optimize.curve_fit`` — scipy wird hier **lazy** importiert,
+    damit die Standard-Prognose (Theil-Sen) ohne scipy auskommt."""
+    try:
+        from scipy.optimize import curve_fit as _scipy_curve_fit  # type: ignore
+    except ImportError:
+        logging.info(
+            "Power-Law uebersprungen: scipy nicht installiert "
+            "(nur noetig fuer die Power-Law-Alternative, nicht fuer Theil-Sen)."
+        )
+        return None
+
     km_shifted = km - last_km
 
     def _model(x, b, c):
