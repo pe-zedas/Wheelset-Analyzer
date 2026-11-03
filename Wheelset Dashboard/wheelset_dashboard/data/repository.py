@@ -40,24 +40,18 @@ class Repository:
             return flotte
         elif self.config.source == "oracle":
             if self.config.oracle_connect_string:
-                from .oracle_source import (load_flotte_from_connect_string,
-                                             load_prognose_from_connect_string)
-                flotte = load_flotte_from_connect_string(
+                # Eine Oracle-Session fuer beide Queries → spart den
+                # zweiten Connect-Handshake (typisch 1–3 s). Fehler beim
+                # Lesen der Prognose-Tabelle werden darin schon geloggt
+                # und blockieren die Rohdaten nicht.
+                from .oracle_source import (
+                    load_flotte_and_prognose_from_connect_string,
+                )
+                flotte = load_flotte_and_prognose_from_connect_string(
                     self.config.oracle_connect_string,
                     profile=self.profile,
                     thick_mode_lib_dir=self.config.oracle_thick_lib_dir,
                 )
-                try:
-                    load_prognose_from_connect_string(
-                        self.config.oracle_connect_string,
-                        profile=self.profile,
-                        flotte=flotte,
-                        thick_mode_lib_dir=self.config.oracle_thick_lib_dir,
-                    )
-                except Exception as exc:  # Prognose-Lesefehler darf Rohdaten nicht blockieren
-                    import logging
-                    logging.getLogger(__name__).warning(
-                        "Prognose-Tabelle konnte nicht gelesen werden: %s", exc)
             else:
                 from .oracle_source import load_flotte_from_oracle
                 flotte = load_flotte_from_oracle(

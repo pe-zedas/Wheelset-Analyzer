@@ -7,7 +7,7 @@ Abfrage bleibt kundenprofilabhaengig (Spaltennamen).
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from .models import Flotte
 from .profile import Profile
@@ -63,18 +63,8 @@ def test_connection(dsn: Optional[str] = None, user: Optional[str] = None,
         conn.close()
 
 
-def load_prognose_from_connect_string(connect_string: str, profile, flotte,
-                                       thick_mode_lib_dir: Optional[str] = None) -> int:
-    """Liest BO_RADSATZDATEN_PROGNOSE und reichert die Messreihen der Flotte an.
-
-    Pro Messreihe wird die juengste Prognose uebernommen (bevorzugt AKTUELL=1,
-    sonst spaetestes LETZTEAENDZEIT, sonst spaetestes DATUM). Analog zum
-    CSV-Loader load_prognose_csv.
-    """
-    try:
-        import oracledb
-    except ImportError as exc:
-        raise OracleConnectionError(f"oracledb nicht installiert: {exc}") from exc
+def _ensure_oracle_client(oracledb, thick_mode_lib_dir: Optional[str]):
+    """Oracle-Client initialisieren (idempotent, Fehler sind ok)."""
     if thick_mode_lib_dir:
         try:
             oracledb.init_oracle_client(lib_dir=thick_mode_lib_dir)
@@ -86,13 +76,10 @@ def load_prognose_from_connect_string(connect_string: str, profile, flotte,
         except Exception:
             pass
 
-    try:
-        conn = oracledb.connect(connect_string)
-    except Exception as exc:
-        raise OracleConnectionError(f"Verbindung fehlgeschlagen: {exc}") from exc
 
-    db_cols = list(profile.columns_prognose.keys())
-    sql = f"SELECT {', '.join(db_cols)} FROM BO_RADSATZDATEN_PROGNOSE"
+def _run_sql(conn, sql: str) -> Tuple[List[str], list]:
+    """Fuehrt SQL auf der ``conn`` aus und liefert ``(header, rows)`` zurueck.
+    Schliesst den Cursor, laesst die Connection unberuehrt."""
     cur = conn.cursor()
     try:
         cur.execute(sql)
@@ -100,10 +87,11 @@ def load_prognose_from_connect_string(connect_string: str, profile, flotte,
         rows = cur.fetchall()
     finally:
         cur.close()
-        conn.close()
+    return header, rows
 
-    log.info("Oracle: %d Zeilen aus BO_RADSATZDATEN_PROGNOSE geladen", len(rows))
 
+def _parse_prognose_rows(rows, header, profile, flotte) -> int:
+    """Parst BO_RADSATZDATEN_PROGNOSE-Zeilen und reichert ``flotte``."""
     from .csv_source import _parse_float, _parse_int, _get
     from .models import Prognose, Quality
     from datetime import datetime as _dt
@@ -186,48 +174,23 @@ def load_prognose_from_connect_string(connect_string: str, profile, flotte,
     return attached
 
 
-def load_flotte_from_connect_string(connect_string: str, profile,
-                                     thick_mode_lib_dir: Optional[str] = None,
-                                     limit: Optional[int] = None):
-    """Variante von load_flotte_from_oracle, die einen fertigen connect_string nimmt."""
-    try:
-        import oracledb
-    except ImportError as exc:
-        raise OracleConnectionError(f"oracledb nicht installiert: {exc}") from exc
-    if thick_mode_lib_dir:
-        try:
-            oracledb.init_oracle_client(lib_dir=thick_mode_lib_dir)
-        except Exception:
-            pass
-    else:
-        try:
-            oracledb.init_oracle_client()
-        except Exception:
-            pass
-
-    try:
-        conn = oracledb.connect(connect_string)
-    except Exception as exc:
-        raise OracleConnectionError(f"Verbindung fehlgeschlagen: {exc}") from exc
-
+def _flotte_raw_sql(profile, limit: Optional[int]) -> str:
     db_cols = list(profile.columns_raw.keys())
     sql = f"SELECT {', '.join(db_cols)} FROM BO_RADSATZDATEN"
     if limit:
         sql += f" FETCH FIRST {int(limit)} ROWS ONLY"
+    return sql
 
-    cur = conn.cursor()
-    try:
-        cur.execute(sql)
-        header = [d[0] for d in cur.description]
-        rows = cur.fetchall()
-    finally:
-        cur.close()
-        conn.close()
 
-    log.info("Oracle: %d Zeilen aus BO_RADSATZDATEN geladen", len(rows))
+def _prognose_sql(profile) -> str:
+    db_cols = list(profile.columns_prognose.keys())
+    return f"SELECT {', '.join(db_cols)} FROM BO_RADSATZDATEN_PROGNOSE"
 
+
+def _parse_flotte_rows(rows, header, profile) -> Flotte:
+    """Parst BO_RADSATZDATEN-Zeilen in eine ``Flotte``."""
     from .csv_source import _add_installed, _add_lager, _parse_float, _get
-    from .models import Flotte, Messpunkt
+    from .models import Messpunkt
 
     flotte = Flotte()
     lager_map = {}
@@ -273,6 +236,88 @@ def load_flotte_from_connect_string(connect_string: str, profile,
         else:
             _add_lager(lager_map, row_s, idx, profile, mdef, side, mp, ausbau)
     flotte.lager = list(lager_map.values())
+    return flotte
+
+
+def load_flotte_from_connect_string(connect_string: str, profile,
+                                     thick_mode_lib_dir: Optional[str] = None,
+                                     limit: Optional[int] = None) -> Flotte:
+    """Laedt BO_RADSATZDATEN ueber einen fertigen Connect-String."""
+    try:
+        import oracledb
+    except ImportError as exc:
+        raise OracleConnectionError(f"oracledb nicht installiert: {exc}") from exc
+    _ensure_oracle_client(oracledb, thick_mode_lib_dir)
+    try:
+        conn = oracledb.connect(connect_string)
+    except Exception as exc:
+        raise OracleConnectionError(f"Verbindung fehlgeschlagen: {exc}") from exc
+    try:
+        header, rows = _run_sql(conn, _flotte_raw_sql(profile, limit))
+    finally:
+        conn.close()
+    log.info("Oracle: %d Zeilen aus BO_RADSATZDATEN geladen", len(rows))
+    return _parse_flotte_rows(rows, header, profile)
+
+
+def load_prognose_from_connect_string(connect_string: str, profile, flotte,
+                                       thick_mode_lib_dir: Optional[str] = None) -> int:
+    """Liest BO_RADSATZDATEN_PROGNOSE und reichert die Messreihen der Flotte an.
+
+    Pro Messreihe wird die juengste Prognose uebernommen (bevorzugt
+    AKTUELL=1, sonst spaetestes LETZTEAENDZEIT, sonst spaetestes DATUM)."""
+    try:
+        import oracledb
+    except ImportError as exc:
+        raise OracleConnectionError(f"oracledb nicht installiert: {exc}") from exc
+    _ensure_oracle_client(oracledb, thick_mode_lib_dir)
+    try:
+        conn = oracledb.connect(connect_string)
+    except Exception as exc:
+        raise OracleConnectionError(f"Verbindung fehlgeschlagen: {exc}") from exc
+    try:
+        header, rows = _run_sql(conn, _prognose_sql(profile))
+    finally:
+        conn.close()
+    log.info("Oracle: %d Zeilen aus BO_RADSATZDATEN_PROGNOSE geladen", len(rows))
+    return _parse_prognose_rows(rows, header, profile, flotte)
+
+
+def load_flotte_and_prognose_from_connect_string(
+        connect_string: str,
+        profile,
+        thick_mode_lib_dir: Optional[str] = None,
+        limit: Optional[int] = None) -> Flotte:
+    """Laedt BO_RADSATZDATEN und BO_RADSATZDATEN_PROGNOSE in EINER
+    Oracle-Session und reichert die Flotte direkt mit den Prognosen an.
+
+    Spart gegenueber dem getrennten Aufruf einen zweiten Verbindungs-
+    aufbau (TCP/TLS-Handshake, Oracle-Session). Fehler beim Lesen der
+    Prognose-Tabelle blockieren die Rohdaten nicht — sie werden geloggt
+    und die Flotte wird ohne Prognosen zurueckgegeben.
+    """
+    try:
+        import oracledb
+    except ImportError as exc:
+        raise OracleConnectionError(f"oracledb nicht installiert: {exc}") from exc
+    _ensure_oracle_client(oracledb, thick_mode_lib_dir)
+    try:
+        conn = oracledb.connect(connect_string)
+    except Exception as exc:
+        raise OracleConnectionError(f"Verbindung fehlgeschlagen: {exc}") from exc
+    try:
+        header_raw, rows_raw = _run_sql(conn, _flotte_raw_sql(profile, limit))
+        log.info("Oracle: %d Zeilen aus BO_RADSATZDATEN geladen", len(rows_raw))
+        flotte = _parse_flotte_rows(rows_raw, header_raw, profile)
+        try:
+            header_p, rows_p = _run_sql(conn, _prognose_sql(profile))
+            log.info("Oracle: %d Zeilen aus BO_RADSATZDATEN_PROGNOSE geladen",
+                     len(rows_p))
+            _parse_prognose_rows(rows_p, header_p, profile, flotte)
+        except Exception as exc:
+            log.warning("Prognose-Tabelle konnte nicht gelesen werden: %s", exc)
+    finally:
+        conn.close()
     return flotte
 
 
