@@ -37,6 +37,10 @@ warnings.filterwarnings(
 _QT_SILENCE_PATTERNS = (
     "QFont::setPointSize",
     "libpyside: Failed to disconnect",
+    # Qt-ICC-Profil-Parser meldet beim Laden mancher PNG/JPG-Dateien
+    # "fromIccProfile: Failed to parse description" — kosmetisch, Bild
+    # wird trotzdem korrekt dargestellt.
+    "fromIccProfile",
 )
 _qt_log = logging.getLogger("qt")
 
