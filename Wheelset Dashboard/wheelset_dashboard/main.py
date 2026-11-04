@@ -4,14 +4,62 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import warnings
 from pathlib import Path
 
+from PySide6.QtCore import QtMsgType, qInstallMessageHandler
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .config.app_paths import ORACLE_CONNECT_FILE, read_oracle_connect_string
 from .config.logging_setup import install_global_exception_handler, setup_logging
 from .data.repository import Repository, RepositoryConfig
 from .ui.main_window import MainWindow
+
+
+# ---------------------------------------------------------------------------
+# Stille beim Start: Qt- und PySide6-interne Warnungen auf stderr dämpfen.
+# Logging-Hinweise gehen nach wie vor in wheelset_dashboard.log.
+# ---------------------------------------------------------------------------
+
+# 1) PySide6-RuntimeWarnings (z. B. "libpyside: Failed to disconnect …"):
+#    Harmlose Lebenszyklus-Meldungen, nicht nutzerwirksam.
+warnings.filterwarnings(
+    "ignore",
+    category=RuntimeWarning,
+    message=r".*libpyside.*",
+)
+
+# 2) Qt-C++-Messages (qWarning/qDebug): landen sonst roh auf stderr.
+#    Wir reichen sie an den Python-Logger weiter — Qt-Warnings erscheinen
+#    damit in der Logdatei (und ab WARNING auch in der Konsole), aber
+#    typische kosmetische Hinweise wie "QFont::setPointSize: Point size
+#    <= 0 (-1)" werden ausgefiltert.
+_QT_SILENCE_PATTERNS = (
+    "QFont::setPointSize",
+    "libpyside: Failed to disconnect",
+)
+_qt_log = logging.getLogger("qt")
+
+
+def _qt_message_handler(mode, ctx, msg):
+    for pat in _QT_SILENCE_PATTERNS:
+        if pat in msg:
+            return
+    if mode == QtMsgType.QtDebugMsg:
+        _qt_log.debug(msg)
+    elif mode == QtMsgType.QtInfoMsg:
+        _qt_log.info(msg)
+    elif mode == QtMsgType.QtWarningMsg:
+        _qt_log.warning(msg)
+    elif mode == QtMsgType.QtCriticalMsg:
+        _qt_log.error(msg)
+    elif mode == QtMsgType.QtFatalMsg:
+        _qt_log.critical(msg)
+    else:
+        _qt_log.info(msg)
+
+
+qInstallMessageHandler(_qt_message_handler)
 
 DEFAULT_CSV_RAW = Path("../Wheelset Analyzer_new_approach/bo_radsatzdaten_export.csv")
 DEFAULT_CSV_PROG = Path("../Wheelset Analyzer_new_approach/bo_radsatzdaten_prognose_recalc.csv")

@@ -125,6 +125,12 @@ class MainWindow(QMainWindow):
         self._prog_cfg = PrognoseConfig()
         self.setWindowTitle("Wheelset Analyzer Dashboard")
         self.resize(1200, 740)
+        # Zustand: hat der jeweilige Drilldown bereits eine aktive
+        # Verbindung? disconnect() nur aufzurufen, wenn verbunden,
+        # vermeidet die PySide6-``libpyside: Failed to disconnect``
+        # RuntimeWarning auf stderr.
+        self._dg_drilldown_connected = False
+        self._achse_drilldown_connected = False
 
         central = QWidget()
         root = QHBoxLayout(central)
@@ -385,15 +391,20 @@ class MainWindow(QMainWindow):
 
     def _set_dg_drilldown_mode(self, mode: str, komp=None):
         """Setzt den DG-Drilldown-Empfaenger je nach Kontext um."""
-        try:
-            self._view_dg.drilldown.disconnect()
-        except Exception:
-            pass
+        # Nur disconnecten, wenn vorher connected wurde — sonst feuert
+        # PySide6 vor der Exception bereits eine RuntimeWarning auf stderr.
+        if self._dg_drilldown_connected:
+            try:
+                self._view_dg.drilldown.disconnect()
+            except Exception:
+                pass
+            self._dg_drilldown_connected = False
         if mode == "lager" and komp is not None:
             self._view_dg.drilldown.connect(
                 lambda path, _k=komp: self._lager_dg_axle_clicked(_k, path))
         else:
             self._view_dg.drilldown.connect(self.navigate)
+        self._dg_drilldown_connected = True
 
     def _set_achse_drilldown_mode(self, mode: str, komp=None):
         """Setzt den Achse-Drilldown-Empfaenger je nach Kontext um.
@@ -401,15 +412,18 @@ class MainWindow(QMainWindow):
         Im Lager-Kontext fangen wir KPI-Klicks ab und routen sie zurueck
         in die Lager-Hierarchie (Lager-Tabelle bzw. Lager-DG-Achsenliste).
         """
-        try:
-            self._view_achse.drilldown.disconnect()
-        except Exception:
-            pass
+        if self._achse_drilldown_connected:
+            try:
+                self._view_achse.drilldown.disconnect()
+            except Exception:
+                pass
+            self._achse_drilldown_connected = False
         if mode == "lager" and komp is not None:
             self._view_achse.drilldown.connect(
                 lambda path, _k=komp: self._lager_back_from_achse(_k, path))
         else:
             self._view_achse.drilldown.connect(self.navigate)
+        self._achse_drilldown_connected = True
 
     def _lager_back_from_achse(self, komp, path):
         """KPI-Klick in der AchseView, wenn die Achse aus dem Lager stammt.
