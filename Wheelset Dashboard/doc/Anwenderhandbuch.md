@@ -37,10 +37,14 @@ zusätzlich den Bereich *Lager · Komponenten*. Überall gilt:
 Die Startansicht nach dem Programmstart.
 
 Was zu sehen ist:
-- **Tabelle *Einheiten · Status je Messgröße*:** eine Zeile pro
-  Einheit, pro Messgröße ein Statuskreis.
+- **Tabelle *Einheiten: Anzahl N - Status (anhand schlechtesten,
+  letzten Messwert)*:** eine Zeile pro Einheit, pro Messgröße ein
+  Statuskreis. Die Ampel pro Zelle entspricht dem schlechtesten Rad-
+  Status dieser Messgröße, bezogen auf den jeweils letzten Messwert.
+  *N* ist die tatsächliche Zeilenanzahl in der Tabelle (folgt dem
+  Filter).
 - **Donut *Status Verteilung · alle Räder*:** Mengenverteilung der
-  Messreihen über die Flotte.
+  Räder über die Flotte.
 - **Kachel *Prognose Fälligkeiten LKD : Flotte*:** waagerechter
   Zeitstrahl mit anstehenden Reprofilierungen, Warn- und
   Grenzüberschreitungen je Einheit.
@@ -117,9 +121,6 @@ Was zu sehen ist:
     Grenzprognose).
   - Mitte: kleine **Radsatz-Grafik** als visuelle Trennung.
   - Rechts: Kacheln für das **rechte Rad**.
-  - Ganz rechts: Hinweisbox mit *Reprofilierungsintervall* und
-    *Abtrag* pro Rad; bei Messgrößen ohne Prognose steht stattdessen
-    *„Keine Prognose vorhanden"*.
   - Bei schmalem Fenster erscheint ein horizontaler Scrollbalken; alle
     Kacheln bleiben über Scrollen erreichbar.
 
@@ -140,11 +141,15 @@ Was man machen kann:
 Übersicht über ausgebaute Achsen und Drehgestelle.
 
 Was zu sehen ist:
-- **Tabelle *Lager-Komponenten*:** eine Zeile pro Komponente, mit Typ
-  (Drehgestell / Achse), Bezeichnung, letzter Einbau-Einheit,
+- **Tabelle *Lager-Komponenten: Anzahl N - Status (anhand
+  schlechtesten, letzten Messwert)*:** eine Zeile pro Komponente, mit
+  Typ (Drehgestell / Achse), Bezeichnung, letzter Einbau-Einheit,
   Ausbaudatum, Zustand (einsatzbereit / zu überholen) und Statuskreisen
-  je Messgröße.
-- **Donut *Status Verteilung · alle Lager-Messreihen*.**
+  je Messgröße. Bei aktivem Zustands-Filter oder Drilldown wird der
+  Zusatz *· einsatzbereit* bzw. *· zu überholen* angehängt; *N* zählt
+  die aktuell sichtbaren Zeilen.
+- **Donut *Status Verteilung · Lager-Räder*.** Bei Drilldown auf eine
+  Komponente erscheint zusätzlich der Komponentenname im Donut-Titel.
 - **Kachel *Prognose Fälligkeiten LKD : Lager*** analog zur Flotte.
 
 Was man machen kann:
@@ -175,6 +180,12 @@ Was zu sehen ist:
   - *Standard-Werte:* Fallback-Sprung und -Intervall.
   - *Darstellung:* Treppen zeichnen, KI-Band zeigen, Konfidenzniveau
     (80 / 90 / 95 / 99 %).
+- **Prognose › Neuberechnung:** Button *Prognose jetzt neu berechnen*
+  startet das Backend-Skript, das die komplette Prognose in die
+  Prognose-Tabelle neu schreibt. Der Dialog schließt sich, die
+  Einstellungen werden übernommen und der Lauf läuft anschließend
+  (dauert einige Minuten, das Dashboard reagiert in dieser Zeit
+  nicht).
 
 Was man machen kann:
 - **OK** übernimmt die Einstellungen sofort und lädt die Datenquelle
@@ -199,6 +210,9 @@ Was man machen kann:
     Tabellen-Ansichten sichtbar.
   - **„Neu laden"** (Button): holt die Daten erneut aus der Quelle
     (CSV oder Oracle) und baut die Ansichten neu auf.
+  - Die *Prognose-Neuberechnung* liegt seit 2026-11-05 nicht mehr in
+    der Statusleiste, sondern unter *Einstellungen › Prognose ·
+    Neuberechnung*.
 - **Filterzeile** über jeder Tabelle: Freitext tippen, um nur die
   passenden Zeilen zu zeigen. Die Fälligkeiten-Kachel bleibt synchron.
 - **Sortieren:** Klick auf eine Spaltenüberschrift sortiert die

@@ -92,11 +92,22 @@ class GanttCanvas(FigureCanvasQTAgg):
     _MARGIN_LEFT_FRAC = 0.14
     _MARGIN_RIGHT_FRAC = 0.98
 
+    # Fest gepinnte Logical-DPI fuer die Umrechnung Pixel ↔ Inches.
+    # matplotlib wuerde sonst beim Verschieben auf einen Monitor mit
+    # anderem Skalierungsfaktor automatisch die figure.dpi anheben
+    # (z.B. 100 → 125 bei 125%-DPI-Scaling), und unsere Resize-Formel
+    # ``w / dpi`` wuerde dadurch zu kleinere Inches-Werten rechnen →
+    # Backbuffer schrumpft, waehrend das Widget seine logischen Pixel
+    # behaelt → Fehldarstellung. Device-Pixel-Ratio handled matplotlib
+    # intern korrekt, solange die figure-DPI konstant bleibt.
+    _LOGICAL_DPI = 100.0
+
     def __init__(self, parent=None):
         # tight_layout: False — wir setzen die Margins selbst (siehe
         # ``_apply_margins``). tight_layout wuerde sonst den oberen Rand
         # mit der Figurehoehe mitwachsen lassen.
-        fig = Figure(figsize=(6.5, 3.5), facecolor="#FFFFFF", tight_layout=False)
+        fig = Figure(figsize=(6.5, 3.5), facecolor="#FFFFFF",
+                     tight_layout=False, dpi=self._LOGICAL_DPI)
         super().__init__(fig)
         self._ax = fig.add_subplot(111)
         self.setMinimumHeight(140)
@@ -133,26 +144,36 @@ class GanttCanvas(FigureCanvasQTAgg):
         else:
             w = max(self.width(), 100)
         self.resize(w, px)
-        dpi = self.figure.dpi or 100
+        # DPI festhalten (siehe _LOGICAL_DPI-Kommentar oben) und nur dann
+        # ueberschreiben, falls matplotlib sie veraendert hat.
+        if abs(self.figure.dpi - self._LOGICAL_DPI) > 0.1:
+            self.figure.set_dpi(self._LOGICAL_DPI)
+        dpi = self._LOGICAL_DPI
+        dpr = float(self.devicePixelRatioF()) if hasattr(self, "devicePixelRatioF") else 1.0
         self.figure.set_size_inches(w / dpi, px / dpi, forward=False)
         self._apply_margins()
+        try:
+            import logging as _l
+            scr = self.screen() if hasattr(self, "screen") else None
+            scr_name = scr.name() if scr is not None else "?"
+            vp = scroll.viewport().width() if scroll is not None else -1
+            fig_in = self.figure.get_size_inches()
+            _l.getLogger(__name__).debug(
+                "GanttCanvas._resize_for_rows: n_rows=%d vp_w=%d self.width=%d "
+                "-> target_px=(%d,%d) dpi=%.1f dpr=%.2f fig_inches=(%.3f,%.3f) screen=%s",
+                n_rows, vp, self.width(), w, px, dpi, dpr,
+                float(fig_in[0]), float(fig_in[1]), scr_name,
+            )
+        except Exception:
+            pass
 
-    def resizeEvent(self, event):
-        """Bei jeder Widget-Groessenaenderung die Figure-Breite synchron
-        halten. QScrollArea mit ``setWidgetResizable(True)`` aendert die
-        Canvas-Breite beim Fenster-Resize — matplotlib's Figure muss
-        dann mitwachsen, sonst bleibt der Plot in der alten Breite und
-        rechts erscheint eine leere Flaeche."""
-        super().resizeEvent(event)
-        dpi = self.figure.dpi or 100
-        w = max(event.size().width(), 100)
-        h = max(event.size().height(), 100)
-        # nur neu setzen, wenn sich die Zielgroesse wirklich aendert
-        cur_w, cur_h = self.figure.get_size_inches()
-        if abs(cur_w - w / dpi) > 1e-3 or abs(cur_h - h / dpi) > 1e-3:
-            self.figure.set_size_inches(w / dpi, h / dpi, forward=False)
-            self._apply_margins()
-            self.draw_idle()
+    # resizeEvent wird NICHT ueberschrieben: matplotlib's eigener
+    # Standard-resizeEvent in FigureCanvasQTAgg handhabt Device-Pixel-
+    # Ratio korrekt (skaliert die Figure intern mit dem dpr des
+    # aktuellen Bildschirms). Ein manuelles set_size_inches(w/dpi, h/dpi)
+    # interferiert mit dieser Automatik und verursacht einen Dauer-Flip
+    # zwischen ×dpr und ÷dpr (siehe Analyse der Debug-Logs vom 2026-11-05
+    # bei Wechsel zwischen PL2492H (dpr=1.0) und DISPLAY1 (dpr=1.25)).
 
     def _apply_margins(self):
         """Setzt die Plot-Area-Raender fest in Pixel (umgerechnet in

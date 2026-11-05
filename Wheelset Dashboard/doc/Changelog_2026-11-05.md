@@ -123,3 +123,59 @@ Messgrößen-Spalten entstehen. Die neue Formulierung macht den
 Status-Algorithmus explizit: Pro Messgröße zählt der schlechteste
 Status über alle Räder der Einheit / Komponente, auf Basis der
 jeweils letzten Messung.
+
+
+## 5. Info-Box rechts neben den Kennzahlen entfernt
+
+Datei: `ui/views.py` (AchseView `refresh_kennzahlen`).
+
+Die bisher ganz rechts angezeigte Info-Box mit Warn-/Grenz-Datum
+und -km je Rad ist entfernt. Dieselben Werte stehen bereits in den
+Kennzahlen-Kacheln links und rechts vom Radsatz-Bild; die Info-Box
+war redundant und hat in schmalen Fenstern Platz weggenommen. Der
+Platz rechts wird jetzt durch einen Stretch gefüllt, so dass die
+Kacheln links bündig gruppiert bleiben.
+
+
+## 6. Fälligkeiten-Kachel: HiDPI-Fix bei Monitor-Wechsel
+
+Datei: `ui/overview_widgets.py` (`GanttCanvas`).
+
+### Was war der Fehler
+
+Beim Verschieben des Dashboards auf einen zweiten Bildschirm mit
+anderem Skalierungsfaktor (typisch: Haupt-Monitor dpr=1.0, Zweit-
+Monitor dpr=1.25) wurde die Fälligkeiten-Kachel unscharf und
+Elemente rutschten über den rechten Kachelrand hinaus.
+
+### Ursache
+
+Der eigene `resizeEvent`-Override auf `GanttCanvas` hat die Figur
+bei jedem Resize per `figure.set_size_inches(w / dpi, h / dpi)`
+auf *logische* Pixel ÷ DPI zurückgesetzt. Matplotlib hat die Figur
+intern sofort wieder um den Device-Pixel-Ratio (×1.25) für
+HiDPI-Rendering hochskaliert. Beim nächsten Resize sah der Override
+das als „falsch" und setzte sie erneut zurück — Dauer-Flip zwischen
+`×dpr` und `÷dpr`. Das Backbuffer-Bild hatte dadurch die falsche
+Auflösung und wurde beim Rendern über die Widget-Grenze gezogen.
+
+### Fix
+
+- `resizeEvent`-Override auf `GanttCanvas` entfernt. Der Standard-
+  `FigureCanvasQTAgg.resizeEvent` von matplotlib handhabt
+  Device-Pixel-Ratio bereits korrekt.
+- `_LOGICAL_DPI = 100.0` als Klassen-Konstante; die Figure wird mit
+  dieser DPI initialisiert. `_resize_for_rows` pinnt die DPI vor
+  jeder Umrechnung wieder auf `_LOGICAL_DPI`, falls matplotlib sie
+  beim Monitor-Wechsel autonom verändert hat.
+- Debug-Logs in `_resize_for_rows` (Viewport-Breite, Figure-Inches,
+  DPI, DPR, Screen-Name) bleiben als DEBUG-Level eingebaut — stumm
+  im Normalbetrieb, mit `-v` sichtbar für künftige Analysen.
+
+### Diagnose-Nachweis
+
+Debug-Logs vor dem Fix zeigten die Werte-Sequenz nach Monitor-
+Wechsel klar: `cur_fig_in=(7.763, 2.125)` nach `set_size_inches(
+6.210, 1.700)` — exakt ×1.25, also matplotlib's eigene DPR-
+Skalierung. Nach dem Fix bleibt die Figure stabil und rendert
+scharf auf beiden Monitoren.

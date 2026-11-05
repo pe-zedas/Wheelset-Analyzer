@@ -70,6 +70,9 @@ DEFAULT_CSV_PROG = Path("../Wheelset Analyzer_new_approach/bo_radsatzdaten_progn
 
 
 def main():
+    import time as _time
+    t_start = _time.monotonic()
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--profile", default="vgf", help="Kundenprofil (vgf/abellio/mob)")
     ap.add_argument("--source", choices=["csv", "oracle"], default="csv")
@@ -85,7 +88,9 @@ def main():
         log_file="wheelset_dashboard.log",
         level="DEBUG" if args.verbose else "INFO",
     )
-    logging.getLogger(__name__).info("Log-Datei: %s", log_path)
+    _log = logging.getLogger(__name__)
+    _log.info("Log-Datei: %s", log_path)
+    _log.debug("Start-Timing: imports=%.2fs (vom Prozessstart bis hier)", _time.monotonic() - t_start)
 
     if args.source == "oracle":
         import os
@@ -115,13 +120,18 @@ def main():
             csv_prognose_path=Path(args.csv_prognose) if Path(args.csv_prognose).exists() else None,
         ))
 
+    t0 = _time.monotonic()
     app = QApplication(sys.argv)
     # QSS laden
     qss_path = Path(__file__).parent / "ui" / "style.qss"
     if qss_path.exists():
         app.setStyleSheet(qss_path.read_text(encoding="utf-8"))
+    t1 = _time.monotonic()
+    _log.debug("Start-Timing: QApplication+QSS=%.2fs", t1 - t0)
 
     win = MainWindow(repo)
+    t2 = _time.monotonic()
+    _log.debug("Start-Timing: MainWindow-Init (inkl. reload_data)=%.2fs", t2 - t1)
 
     def _ui_crash(exc_type, exc_value, exc_tb):
         QMessageBox.critical(win, "Unerwarteter Fehler",
@@ -129,6 +139,8 @@ def main():
     install_global_exception_handler(_ui_crash)
 
     win.show()
+    t3 = _time.monotonic()
+    _log.debug("Start-Timing: GESAMT bis show()=%.2fs", t3 - t_start)
     sys.exit(app.exec())
 
 

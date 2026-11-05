@@ -90,8 +90,15 @@ def _ensure_oracle_client(oracledb, thick_mode_lib_dir: Optional[str]):
 
 def _run_sql(conn, sql: str) -> Tuple[List[str], list]:
     """Fuehrt SQL auf der ``conn`` aus und liefert ``(header, rows)`` zurueck.
-    Schliesst den Cursor, laesst die Connection unberuehrt."""
+    Schliesst den Cursor, laesst die Connection unberuehrt.
+
+    ``arraysize``/``prefetchrows`` werden erhoeht, damit grosse Ergebnismengen
+    (BO_RADSATZDATEN: 12k Zeilen, BO_RADSATZDATEN_PROGNOSE: 5k Zeilen) in
+    wenigen Netzwerk-Runden statt in Hunderten gefetcht werden.
+    """
     cur = conn.cursor()
+    cur.arraysize = 5000
+    cur.prefetchrows = 5000
     try:
         cur.execute(sql)
         header = [d[0] for d in cur.description]
@@ -382,28 +389,95 @@ def load_flotte_and_prognose_from_connect_string(
     Prognose-Tabelle blockieren die Rohdaten nicht — sie werden geloggt
     und die Flotte wird ohne Prognosen zurueckgegeben.
     """
+    import time as _time
+    import threading as _th
     try:
         import oracledb
     except ImportError as exc:
         raise OracleConnectionError(f"oracledb nicht installiert: {exc}") from exc
+    t0 = _time.monotonic()
     _ensure_oracle_client(oracledb, thick_mode_lib_dir)
-    try:
-        conn = oracledb.connect(connect_string)
-    except Exception as exc:
-        raise OracleConnectionError(f"Verbindung fehlgeschlagen: {exc}") from exc
-    try:
-        header_raw, rows_raw = _run_sql(conn, _flotte_raw_sql(profile, limit))
-        log.info("Oracle: %d Zeilen aus BO_RADSATZDATEN geladen", len(rows_raw))
-        flotte = _parse_flotte_rows(rows_raw, header_raw, profile)
+    t1 = _time.monotonic()
+
+    # Zwei parallele Oracle-Sessions: die Rohdaten-Query (~12k Zeilen,
+    # dominiert die Gesamtzeit) laeuft gleichzeitig mit der Prognose-
+    # Query (~5k Zeilen). Verbindungsaufbau selbst passiert ebenfalls
+    # parallel, so dass die Netzwerk-Latenz nur einmal in die
+    # Gesamtzeit eingeht.
+    raw_result: dict = {}
+    prog_result: dict = {}
+
+    def _worker_raw():
         try:
-            header_p, rows_p = _run_sql(conn, _prognose_sql(profile))
-            log.info("Oracle: %d Zeilen aus BO_RADSATZDATEN_PROGNOSE geladen",
-                     len(rows_p))
-            _parse_prognose_rows(rows_p, header_p, profile, flotte)
+            tc0 = _time.monotonic()
+            conn = oracledb.connect(connect_string)
+            tc1 = _time.monotonic()
+            try:
+                header, rows = _run_sql(conn, _flotte_raw_sql(profile, limit))
+                tc2 = _time.monotonic()
+                raw_result["header"] = header
+                raw_result["rows"] = rows
+                raw_result["t_connect"] = tc1 - tc0
+                raw_result["t_sql"] = tc2 - tc1
+            finally:
+                conn.close()
         except Exception as exc:
-            log.warning("Prognose-Tabelle konnte nicht gelesen werden: %s", exc)
-    finally:
-        conn.close()
+            raw_result["error"] = exc
+
+    def _worker_prog():
+        try:
+            tc0 = _time.monotonic()
+            conn = oracledb.connect(connect_string)
+            tc1 = _time.monotonic()
+            try:
+                header, rows = _run_sql(conn, _prognose_sql(profile))
+                tc2 = _time.monotonic()
+                prog_result["header"] = header
+                prog_result["rows"] = rows
+                prog_result["t_connect"] = tc1 - tc0
+                prog_result["t_sql"] = tc2 - tc1
+            finally:
+                conn.close()
+        except Exception as exc:
+            prog_result["error"] = exc
+
+    th_raw = _th.Thread(target=_worker_raw, name="oracle-raw", daemon=True)
+    th_prog = _th.Thread(target=_worker_prog, name="oracle-prognose", daemon=True)
+    th_raw.start()
+    th_prog.start()
+    th_raw.join()
+    th_prog.join()
+    t2 = _time.monotonic()
+
+    if "error" in raw_result:
+        raise OracleConnectionError(
+            f"Verbindung/Abfrage BO_RADSATZDATEN fehlgeschlagen: {raw_result['error']}"
+        ) from raw_result["error"]
+
+    log.debug(
+        "Oracle (parallel) — init_client=%.2fs, parallel-block=%.2fs "
+        "[raw: connect=%.2fs SQL+fetch=%.2fs | prog: connect=%.2fs SQL+fetch=%.2fs]",
+        t1 - t0, t2 - t1,
+        raw_result.get("t_connect", 0.0), raw_result.get("t_sql", 0.0),
+        prog_result.get("t_connect", 0.0), prog_result.get("t_sql", 0.0),
+    )
+    log.info("Oracle: %d Zeilen aus BO_RADSATZDATEN geladen", len(raw_result["rows"]))
+
+    t3 = _time.monotonic()
+    flotte = _parse_flotte_rows(raw_result["rows"], raw_result["header"], profile)
+    t4 = _time.monotonic()
+    log.debug("Oracle: parse_flotte_rows=%.2fs", t4 - t3)
+
+    if "error" in prog_result:
+        log.warning("Prognose-Tabelle konnte nicht gelesen werden: %s", prog_result["error"])
+    else:
+        log.info(
+            "Oracle: %d Zeilen aus BO_RADSATZDATEN_PROGNOSE geladen",
+            len(prog_result["rows"]),
+        )
+        _parse_prognose_rows(prog_result["rows"], prog_result["header"], profile, flotte)
+        t5 = _time.monotonic()
+        log.debug("Oracle: parse_prognose_rows=%.2fs", t5 - t4)
     return flotte
 
 
@@ -425,6 +499,8 @@ def load_flotte_from_oracle(
     except ImportError as exc:
         raise OracleConnectionError(f"oracledb nicht installiert: {exc}") from exc
 
+    import time as _time
+    t_init0 = _time.monotonic()
     # Thick-Mode versuchen; Fehler → Thin-Mode-Fallback.
     if thick_mode_lib_dir:
         try:
@@ -436,11 +512,13 @@ def load_flotte_from_oracle(
             oracledb.init_oracle_client()
         except Exception as exc:
             log.debug("init_oracle_client (auto): %s", exc)
+    t_init1 = _time.monotonic()
 
     try:
         conn = oracledb.connect(user=user, password=password, dsn=dsn)
     except Exception as exc:
         raise OracleConnectionError(f"Verbindung fehlgeschlagen: {exc}") from exc
+    t_conn = _time.monotonic()
 
     # Spalten aus Profil ableiten (DB-Spaltenname -> intern)
     db_cols = list(profile.columns_raw.keys())
@@ -449,13 +527,20 @@ def load_flotte_from_oracle(
     cur = conn.cursor()
     try:
         cur.execute(sql)
+        t_exec = _time.monotonic()
         header = [d[0] for d in cur.description]
         rows = cur.fetchall()
+        t_fetch = _time.monotonic()
     finally:
         cur.close()
         conn.close()
 
-    log.info("Oracle: %d Zeilen aus BO_RADSATZDATEN geladen (Profil %s)", len(rows), profile.name)
+    log.info("Oracle: %d Zeilen aus BO_RADSATZDATEN geladen (Profil %s)",
+             len(rows), profile.name)
+    log.debug(
+        "Oracle timings: init_client=%.2fs, connect=%.2fs, execute=%.2fs, fetch=%.2fs",
+        t_init1 - t_init0, t_conn - t_init1, t_exec - t_conn, t_fetch - t_exec,
+    )
 
     # Delegiere Row-Verarbeitung an denselben Pfad wie CSV
     from .csv_source import _add_installed, _add_lager, _parse_datetime, _parse_int

@@ -119,12 +119,17 @@ class Breadcrumb(QWidget):
 
 class MainWindow(QMainWindow):
     def __init__(self, repo: Repository, parent=None):
+        import time as _time
+        _ti0 = _time.monotonic()
         super().__init__(parent)
         self._repo = repo
         self._flotte: Optional[Flotte] = None
         self._prog_cfg = PrognoseConfig()
         self.setWindowTitle("Wheelset Analyzer Dashboard")
         self.resize(1200, 740)
+        self._ti0 = _ti0
+        _ti_a = _time.monotonic()
+        log.debug("MW phase: super+title+resize=%.2fs", _ti_a - _ti0)
         # Zustand: hat der jeweilige Drilldown bereits eine aktive
         # Verbindung? disconnect() nur aufzurufen, wenn verbunden,
         # vermeidet die PySide6-``libpyside: Failed to disconnect``
@@ -137,7 +142,11 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
+        import time as _time
+        _ts0 = _time.monotonic()
         self._nav = SideNav()
+        _ts1 = _time.monotonic()
+        log.debug("MW phase: SideNav (mit qta.icons)=%.2fs", _ts1 - _ts0)
         root.addWidget(self._nav)
 
         right = QWidget()
@@ -154,6 +163,7 @@ class MainWindow(QMainWindow):
         header.addWidget(self._breadcrumb, 1)
 
         logo_path = Path(__file__).parent / "assets" / "zedas_asset.svg"
+        _tl0 = _time.monotonic()
         if logo_path.exists():
             from PySide6.QtSvgWidgets import QSvgWidget
             logo = QSvgWidget(str(logo_path))
@@ -161,14 +171,27 @@ class MainWindow(QMainWindow):
             logo.setFixedSize(QSize(179, 32))
             logo.setToolTip("zedas® asset")
             header.addWidget(logo, 0, Qt.AlignVCenter)
+        _tl1 = _time.monotonic()
+        log.debug("MW phase: Logo (QSvgWidget)=%.2fs", _tl1 - _tl0)
         right_lay.addLayout(header)
 
+        import time as _time
+        _tv0 = _time.monotonic()
         self._stack = QStackedWidget()
         self._view_flotte = FlotteView()
+        _tv1 = _time.monotonic()
         self._view_einheit = EinheitView()
+        _tv2 = _time.monotonic()
         self._view_dg = DrehgestellView()
+        _tv3 = _time.monotonic()
         self._view_achse = AchseView()
+        _tv4 = _time.monotonic()
         self._view_lager = LagerView()
+        _tv5 = _time.monotonic()
+        log.debug(
+            "MW views: flotte=%.2fs einheit=%.2fs dg=%.2fs achse=%.2fs lager=%.2fs",
+            _tv1-_tv0, _tv2-_tv1, _tv3-_tv2, _tv4-_tv3, _tv5-_tv4,
+        )
         for v in (self._view_flotte, self._view_einheit, self._view_dg,
                   self._view_achse, self._view_lager):
             self._stack.addWidget(v)
@@ -209,7 +232,14 @@ class MainWindow(QMainWindow):
         self._update_values_cb_visibility()
 
         # Menueleiste
+        import time as _time
+        _tm0 = _time.monotonic()
         self._build_menu()
+        _tm1 = _time.monotonic()
+        log.debug(
+            "MW phases: pre_reload_total=%.2fs (menu=%.2fs)",
+            _tm1 - self._ti0, _tm1 - _tm0,
+        )
 
         # Nav-Buttons verdrahten
         self._nav.button("flotte").clicked.connect(lambda: self.navigate([]))
@@ -293,10 +323,19 @@ class MainWindow(QMainWindow):
     # ------------------- data ----------------------------
 
     def reload_data(self):
+        import time as _time
+        _t0 = _time.monotonic()
         try:
             flotte = self._repo.load()
+            _t1 = _time.monotonic()
             recompute_status(flotte)
+            _t2 = _time.monotonic()
             recompute_lager(flotte)
+            _t3 = _time.monotonic()
+            log.debug(
+                "reload_data timing: repo.load=%.2fs, status=%.2fs, lager=%.2fs",
+                _t1 - _t0, _t2 - _t1, _t3 - _t2,
+            )
             self._flotte = flotte
             self._status_lbl.setText(
                 f"Stand {datetime.now().strftime('%H:%M:%S')}  ·  Profil: {self._repo.profile.name}  "

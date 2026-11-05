@@ -1197,55 +1197,12 @@ class AchseView(QWidget):
         for w in right_cards:
             self._kennzahlen_row.addWidget(w)
 
-        # Prognose-Status-Kachel ganz rechts. Zwei Varianten:
-        # - Prognose vorhanden: Warn-/Grenz-Datum + km-Stand je Rad
-        #   (Werte stammen direkt aus der Prognose-Tabelle).
-        # - Keine Prognose: Hinweistext.
-        has_prognose = bool(getattr(current.canvas, "_prognose_available", False))
-        info = getattr(current.canvas, "_prognose_info", []) or []
-        if has_prognose and info:
-            self._kennzahlen_row.addStretch(1)
-            lines = []
-            # info ist Liste von (label, prog). Fuer die Datumsverschiebung
-            # ab heute brauchen wir zusaetzlich die Messreihe des Rades.
-            # self._mr_by_label (gesetzt in refresh_kennzahlen) liefert das.
-            mr_by_label = getattr(self, "_mr_by_label", {}) or {}
-            for label, prog in info:
-                parts = []
-                mr_here = mr_by_label.get(label)
-                dw = faelligkeit_shift(prog.datum_warnwert, mr_here) if mr_here is not None else prog.datum_warnwert
-                dg = faelligkeit_shift(prog.datum_grenzwert, mr_here) if mr_here is not None else prog.datum_grenzwert
-                if dw is not None:
-                    km = (f" ({prog.km_warnwert/1000:,.0f} Tkm)".replace(",", " ")
-                          if prog.km_warnwert is not None else "")
-                    parts.append(f"Warn {dw:%d.%m.%Y}{km}")
-                if dg is not None:
-                    km = (f" ({prog.km_grenzwert/1000:,.0f} Tkm)".replace(",", " ")
-                          if prog.km_grenzwert is not None else "")
-                    parts.append(f"Grenz {dg:%d.%m.%Y}{km}")
-                if parts:
-                    lines.append(f"{label}: " + " · ".join(parts))
-            box = QLabel("\n".join(lines))
-            box.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            box.setStyleSheet(
-                "QLabel { color: #444441; font-size: 11px; "
-                "background-color: #FFFFFF; border: 1px solid #D4D6DC; "
-                "border-radius: 6px; padding: 6px 12px; }"
-            )
-            self._kennzahlen_row.addWidget(box)
-        elif not has_prognose and self._prognose_config and getattr(
-                self._prognose_config, "show_reprof_steps", False):
-            self._kennzahlen_row.addStretch(1)
-            hint = QLabel("Keine Prognose vorhanden")
-            hint.setAlignment(Qt.AlignCenter)
-            hint.setStyleSheet(
-                "QLabel { color: #6B6F78; font-size: 11px; font-style: italic; "
-                "background-color: #F5F6F8; border: 1px solid #D4D6DC; "
-                "border-radius: 6px; padding: 8px 14px; }"
-            )
-            self._kennzahlen_row.addWidget(hint)
-        else:
-            self._kennzahlen_row.addStretch(1)
+        # Die frueher ganz rechts angezeigte Prognose-Info-Box ist
+        # entfallen: ihre Angaben (Warn-/Grenz-Datum und -km je Rad)
+        # stehen bereits in den Kacheln links und rechts vom Radsatz-
+        # Bild. Nur ein Stretch bleibt, damit die Kacheln links
+        # buendig gruppiert sind.
+        self._kennzahlen_row.addStretch(1)
 
 
 # -----------------------------------------------------------

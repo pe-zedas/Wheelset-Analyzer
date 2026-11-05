@@ -39,14 +39,19 @@ class Repository:
             self._flotte = flotte
             return flotte
         elif self.config.source == "oracle":
+            import logging as _logging, time as _time
+            _rl = _logging.getLogger(__name__)
             if self.config.oracle_connect_string:
                 # Eine Oracle-Session fuer beide Queries → spart den
                 # zweiten Connect-Handshake (typisch 1–3 s). Fehler beim
                 # Lesen der Prognose-Tabelle werden darin schon geloggt
                 # und blockieren die Rohdaten nicht.
+                _ti0 = _time.monotonic()
                 from .oracle_source import (
                     load_flotte_and_prognose_from_connect_string,
                 )
+                _ti1 = _time.monotonic()
+                _rl.debug("repo: import oracle_source (inkl. oracledb)=%.2fs", _ti1 - _ti0)
                 flotte = load_flotte_and_prognose_from_connect_string(
                     self.config.oracle_connect_string,
                     profile=self.profile,
