@@ -46,6 +46,7 @@ columns_prognose:
   KM_GRENZWERT: km_grenzwert
   DATUM_GRENZWERT: datum_grenzwert
   AKTUELL: aktuell
+  AUSBAU: ausbau
 
 # Pflichtfelder je Messpunkt — fehlt eines, wird der Punkt verworfen
 required_measurement_fields:

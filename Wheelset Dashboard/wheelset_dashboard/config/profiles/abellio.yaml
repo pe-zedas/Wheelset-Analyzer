@@ -47,6 +47,7 @@ columns_prognose:
   KM_GRENZWERT: km_grenzwert
   DATUM_GRENZWERT: datum_grenzwert
   AKTUELL: aktuell
+  AUSBAU: ausbau
 
 # Lt. ZAR-3219: MIN/MAX/MIN_BEREICH/LAUFLEISTUNG oft leer -> gelockerte Base-Pflicht
 required_measurement_fields:

@@ -13,11 +13,38 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import List, Optional, Tuple
 
 import numpy as np
 
 from ..data.models import Messpunkt, Messreihe, PrognoseConfig
+
+
+def faelligkeit_shift(prog_dt: Optional[datetime], mr: Messreihe) -> Optional[datetime]:
+    """Verschiebt ein Prognose-Faelligkeitsdatum fuer die Anzeige ab heute.
+
+    Hintergrund: Das Backend schreibt alle Prognose-Datumswerte direkt
+    ab dem letzten Messwert. Fuer ruhende Raeder (Lagerkomponenten oder
+    eingebaute Raeder ohne neue Messungen) laegen Warn-, Grenz- und
+    Reprof-Termine damit in der Vergangenheit. Weil eine ruhende Achse
+    nicht verschleisst, gilt die Restlebensdauer erst ab der Wieder-
+    inbetriebnahme — Faelligkeiten werden daher um
+    ``delta = heute - letzter_messwert`` verschoben.
+
+    Diese Verschiebung wirkt NUR auf Anzeige-Ebene (Kachel, KpiCards,
+    Info-Box, Werkstattlisten-Export). Diagramm und Treppe bleiben am
+    echten letzten Messwert verankert.
+    """
+    if prog_dt is None:
+        return None
+    letzt = mr.letzter_wert()
+    if letzt is None:
+        return prog_dt
+    heute = datetime.now()
+    if letzt.datum >= heute:
+        return prog_dt
+    return prog_dt + (heute - letzt.datum)
 
 
 @dataclass

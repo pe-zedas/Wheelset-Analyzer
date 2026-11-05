@@ -172,7 +172,7 @@ def load_bo_radsatz_from_csv(csv_path, dt_start_str):
         )
         if key not in res1_keys:
             res1_keys.add(key)
-            res1.append(key)
+            res1.append(key + (None, 0))
 
     res2 = []
     for d in zeilen:

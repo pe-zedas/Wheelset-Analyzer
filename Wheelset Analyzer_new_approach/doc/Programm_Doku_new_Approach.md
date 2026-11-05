@@ -1,6 +1,6 @@
 # Programmdokumentation: Radsatz_Bahn_DB_new_Approach.py
 
-Stand: 2026-06-01, Rev. 5 (Datums-Speicherung umgestellt auf `numpy.datetime64`; Matlab-Datezahl entfällt im neuen Ansatz)  
+Stand: 2026-11-05, Rev. 6 (Prognose für Lagerkomponenten; Reprof-Lernen mit IQR und stabiler Sortierung; Simulation bis MIN)  
 Autor: Peter Engel  
 Basis: `doc/Neuer_Ansatz_Radsatz_Analyse_Prognose_CL.md`
 
@@ -1301,6 +1301,81 @@ in km und Prozent des tatsächlichen Restwegs.
 **Motivation:** Saubere Trennung von „kein Wert" (NaT) und „echter 0-Wert",
 Wegfall des Schaltjahr-0-Offsets (`+366 days`) der Matlab-Datezahl, bessere
 Lesbarkeit der Zwischenwerte (datetime64 lässt sich in numpy direkt anzeigen).
+
+### 13.8 Prognose für Lagerkomponenten
+
+**Stand: 2026-11-05.** Der Algorithmus berechnet jetzt für **ausgebaute**
+Achsen und Drehgestelle (Lager) gleichwertig eine Prognose wie für
+eingebaute. Die Ergebnisse wandern in dieselbe Zieltabelle
+`BO_RADSATZDATEN_PROGNOSE` (bzw. die kompatible CSV); das Dashboard
+liest sie dort und hängt sie über `RSEINHEITID` an die Lager-Räder.
+
+- **SQL** (`_fetch_oracle_measurements`): Die WHERE-Klausel akzeptiert
+  Zeilen, bei denen `ausbau is not null` ist, **unabhängig** vom
+  `dt_start_data`-Cutoff:
+
+  ```
+  and (ausbau is not null or datum > TO_DATE(:StartDatum,:FormatString))
+  ```
+
+- **CSV-Loader** (`radsatz_csv_io.py`): der `dt_start`-Vergleich
+  `dt_mess <= dt_start` wird nur noch angewendet, wenn `AUSBAU` leer
+  ist.
+
+- **Eindeutigkeit**: der Achsen-Schlüssel wird für ausgebaute Zeilen
+  um `RSEINHEITID` erweitert (`radsatz_axis_labels.make_axis_key`,
+  Zusatzparameter `rseinheitid`). Damit gilt für eine Ausbaupositon
+  (z. B. `C0402 Losradachse 1`) jede physische Achse als eigener
+  Lauf, so dass das Dashboard beide — eingebautes Rad und das vorher
+  dort montierte Lagerrad — korrekt getrennt sieht.
+
+- **Zyklus-Erkennung**: positive LKD-Sprünge (Radwechsel) werden über
+  `toolsWheelset.getPositiveJumpIndices` identifiziert. Der Fit nutzt
+  den letzten Zyklus; reicht der nicht (zu wenige Punkte), schaltet
+  `_build_previous_cycle_fallback` auf den vorherigen Zyklus um und
+  berechnet die zukünftige Treppe aus **dessen** Anstieg, aber vom
+  **aktuellen** `last_km` (bzw. `last_lkd`) ausgehend
+  (`_slope_from_previous_cycle` + `_simulate_with_reprofilings`).
+
+- **Reprof-Parameter aus Historie** (`reprof_learning.py`):
+
+  - `_sorted_km_lkd` sortiert mit `kind="stable"`, damit
+    Doppelmessungen zum selben km-Stand (Vorher/Nachher der
+    Reprofilierung) in ihrer Original-Reihenfolge bleiben.
+  - `_iqr_filter` (`min_n=4`, `k=1.5`) entfernt Ausreißer aus den
+    gelernten Intervallen und Abtragstiefen, sobald genügend
+    Reprof-Ereignisse vorliegen.
+  - Das Seeding der Intervall-Erkennung nutzt
+    `seed_dlkd_min_abs` (konservative untere Schranke aus der INI)
+    statt des pro-Achse gelernten, strengen Schwellwerts, damit
+    einzelne kleinere Reprofs nicht verloren gehen.
+
+- **Simulation bis MIN** (`prognosis_new_core._simulate_with_reprofilings`):
+  Nach dem letzten Reprof-Zyklus wird die Prognose mit dem Steigungswert
+  des zuletzt simulierten Zyklus **bis zum Erreichen von
+  `min_val`** verlängert (begrenzt auf `last_km + n_km_horizon`),
+  statt am letzten Reprof-Punkt abzubrechen.
+
+- **Datenhaltung**: Vor jedem Oracle-Lauf werden alle LKD-Zeilen in
+  `BO_RADSATZDATEN_PROGNOSE` für die aktiven `ZARTBEZ`-Werte gelöscht
+  (`delete from BO_RADSATZDATEN_PROGNOSE where ZARTBEZ in (:z1,:z2)`).
+  Das vermeidet Dubletten aus alten und neuen Läufen, die eine
+  14-Tage-Bereinigung nicht zuverlässig entfernen würde.
+
+- **Plot-Dateien**: Lager-Plots erhalten im Dateinamen das Suffix
+  `__Lager_<RSEINHEITID>`, damit eingebaute Achse und frühere
+  Lager-Belegung derselben Position nicht mehr dieselbe PNG
+  überschreiben.
+
+### 13.9 Konfigurations-Notizen
+
+- Für eine normale Produktions-Berechnung bleibt
+  `[pipeline] use_database = true`.
+- Für eine schnelle Kontrolle ohne Oracle (z. B. nach Algorithmus-
+  Änderungen) kann temporär auf CSV-Modus umgeschaltet werden
+  (`use_database = false`, `[paths] csv_bo_radsatzdaten`). Das
+  Ergebnis landet in `bo_radsatzdaten_prognose_recalc.csv` und hat
+  dieselbe Spaltenstruktur wie die DB-Tabelle.
 
 ---
 

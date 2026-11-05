@@ -116,11 +116,15 @@ def _sorted_km_lkd(met) -> Tuple[np.ndarray, np.ndarray]:
     lkd_arr = np.array(met.getvalues(), dtype=float)
     if len(km_arr) < 2:
         return km_arr, lkd_arr
-    order = np.argsort(km_arr)
+    # Stabile Sortierung: bei gleichem km bleibt die Einfuege-Reihenfolge
+    # erhalten. Wichtig fuer Werkstatt-Doppelmessungen (vor/nach Reprof
+    # am selben km), damit der negative LKD-Sprung erhalten bleibt.
+    order = np.argsort(km_arr, kind="stable")
     return km_arr[order], lkd_arr[order]
 
 
 def _collect_negative_steps(km_arr: np.ndarray, lkd_arr: np.ndarray) -> Tuple[List[float], List[float]]:
+    """Erfasst alle negativen LKD-Spruenge (jeder Uebergang einzeln)."""
     neg_dkm: List[float] = []
     neg_drop: List[float] = []
     if len(km_arr) < 2:
@@ -142,6 +146,9 @@ def _intervals_from_series(
     dkm_threshold: float,
     dlkd_abs_min: float,
 ) -> List[float]:
+    """Km-Abstaende zwischen aufeinanderfolgenden Reprof-km-Positionen.
+    Mehrere Doppelmessungen am selben km liefern Null-Abstaende — die
+    werden spaeter in ``_fit_reprof_params`` herausgefiltert."""
     if len(km_arr) < 3:
         return []
     repro_km: List[float] = []
@@ -154,6 +161,26 @@ def _intervals_from_series(
     if len(repro_km) < 2:
         return []
     return np.diff(np.array(repro_km, dtype=float)).tolist()
+
+
+def _iqr_filter(values: Sequence[float], min_n: int = 4, k: float = 1.5) -> List[float]:
+    """IQR-Ausreisser-Filter. Greift nur ab ``min_n`` Punkten; sonst
+    unveraendert. Entfernt Werte ausserhalb von
+    ``[Q1 - k*IQR, Q3 + k*IQR]``."""
+    arr = np.asarray(list(values), dtype=float)
+    if arr.size < min_n:
+        return arr.tolist()
+    q1 = float(np.percentile(arr, 25))
+    q3 = float(np.percentile(arr, 75))
+    iqr = q3 - q1
+    if iqr <= 0:
+        return arr.tolist()
+    lo = q1 - k * iqr
+    hi = q3 + k * iqr
+    kept = arr[(arr >= lo) & (arr <= hi)]
+    if kept.size < min_n:
+        return arr.tolist()
+    return kept.tolist()
 
 
 def _fit_reprof_params(
@@ -189,12 +216,30 @@ def _fit_reprof_params(
     if n_detected < min_seeds:
         return None
 
-    typical_magnitude_mm = float(np.median(drop_arr[repro_mask]))
+    # Ausreisser-Filter: ab 4 Ereignissen werden extreme Abtrag-Werte
+    # per IQR entfernt. Vermeidet, dass ein einzelner Rad-Tausch-naher
+    # Riesen-Sprung die Magnitude nach oben zieht.
+    drops_filtered = _iqr_filter(drop_arr[repro_mask].tolist(), min_n=4, k=1.5)
+    typical_magnitude_mm = float(np.median(drops_filtered)) if drops_filtered else float(np.median(drop_arr[repro_mask]))
 
+    # Intervall-Erkennung bewusst mit der NIEDRIGEREN Seed-Schwelle
+    # (seed_dlkd_min_abs, typ. 2.0 mm) statt dem gelernten strengeren
+    # dlkd_abs_min. Sonst wuerde ein kleiner Reprof knapp unter der
+    # Schwelle ausgefiltert, zwei echte Reprof-Ereignisse wuerden zu
+    # einem verschmelzen und das Intervall verdoppelt sich. Die
+    # Magnitude-Statistik oben bleibt davon unberuehrt.
     intervals: List[float] = []
     for km_arr, lkd_arr in interval_sources:
-        intervals.extend(_intervals_from_series(km_arr, lkd_arr, dkm_threshold, dlkd_abs_min))
-    typical_interval_km = float(np.median(intervals)) if intervals else 0.0
+        intervals.extend(_intervals_from_series(km_arr, lkd_arr, dkm_threshold, seed_dlkd_min_abs))
+    # Vor-Reprof- und Nach-Reprof-Messung einer Werkstattaktion liegen bei
+    # gleicher Laufleistung → Null-Abstand zwischen ihnen. Das ist KEIN
+    # realistisches Reprof-Intervall → rausfiltern.
+    intervals_nonzero = [v for v in intervals if v > 0]
+    # IQR-Filter auf den verbleibenden Intervallen (robust gegen
+    # Ausreisser wie verpasste Zwischenmessungen, die einzelne Intervalle
+    # verdoppeln oder vervielfachen).
+    intervals_filtered = _iqr_filter(intervals_nonzero, min_n=4, k=1.5) if intervals_nonzero else []
+    typical_interval_km = float(np.median(intervals_filtered)) if intervals_filtered else 0.0
 
     if log_label:
         logging.info(

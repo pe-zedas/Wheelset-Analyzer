@@ -24,6 +24,10 @@ Wheelset Dashboard/config/oracle_connect_string.txt
 # ── Zwischenablagen / Scratch-Artefakte ───────────────────────────────────
 Wheelset Dashboard/Image_Radachse_clean.jpg
 
+# ── Ad-hoc Backups und Debug-Skripte (lokal, nicht ins Repo) ──────────────
+*_v2_backup.py
+Wheelset Analyzer_new_approach/plot_lkd_flirt101_dg1_ls1.py
+
 # ── Editor-/IDE-Artefakte ──────────────────────────────────────────────────
 .vscode/
 .idea/

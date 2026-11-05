@@ -17,6 +17,7 @@ from .models import (
     Messpunkt,
     Messreihe,
     Prognose,
+    PrognosePunkt,
     Quality,
     Rad,
     Side,
@@ -191,14 +192,13 @@ def _add_lager(lager_map, row, idx, profile: Profile, mdef, side: Side, mp: Mess
     dg_bez = _get(row, idx, "dg_bez").strip()
     dg_id = _parse_int(_get(row, idx, "dg_id"))
     rs_einbaupos = _get(row, idx, "rs_einbaupos").strip()
-    ausbau_bucket = ausbau.date() if ausbau else None
 
     has_dg = (dg_id is not None) or bool(dg_bez)
     if has_dg:
-        key = ("dg", dg_id, dg_bez, ausbau_bucket)
+        key = ("dg", dg_id, dg_bez)
         kind = "drehgestell"
     else:
-        key = ("rs", rs_id, rs_bez, ausbau_bucket)
+        key = ("rs", rs_id, rs_bez)
         kind = "achse"
 
     comp = lager_map.get(key)
@@ -214,6 +214,11 @@ def _add_lager(lager_map, row, idx, profile: Profile, mdef, side: Side, mp: Mess
             dg_bez=dg_bez,
         )
         lager_map[key] = comp
+    else:
+        # Mehrere Ausbau-Zyklen -> immer das juengste Ausbau-Datum verwenden
+        if ausbau and (comp.ausbau is None or ausbau > comp.ausbau):
+            comp.ausbau = ausbau
+            comp.letzte_einheit = _get(row, idx, "topeinheit_bez").strip()
 
     if kind == "drehgestell":
         # Unter dem DG: eine Achse pro rs_id/rs_einbaupos
@@ -270,9 +275,21 @@ def load_prognose_csv(path: Path, profile: Profile, flotte: Flotte) -> int:
             for a in dg.achsen.values():
                 axis_by_ids[(e.topeinheit_id, dg.dg_id, a.rs_id)] = (e, dg, a)
 
-    # Zuerst pro (achse, side, messgroesse) die beste Zeile sammeln,
-    # dann in einem zweiten Pass die Prognose anheften.
-    best: Dict[tuple, tuple] = {}  # key -> (score, prog)
+    # Lookup fuer Lagerkomponenten ueber rs_id (physische Achse).
+    lager_axle_by_rsid: Dict[int, "object"] = {}
+    lager_dg_axle_by_rsid: Dict[int, tuple] = {}
+    for comp in flotte.lager:
+        if comp.kind == "achse" and comp.rs_id is not None:
+            lager_axle_by_rsid[comp.rs_id] = comp
+        elif comp.kind == "drehgestell":
+            for inner_axle in comp.achsen.values():
+                if inner_axle.rs_id is not None:
+                    lager_dg_axle_by_rsid[inner_axle.rs_id] = (comp, inner_axle)
+
+    best: Dict[tuple, tuple] = {}
+    punkte: Dict[tuple, List[PrognosePunkt]] = {}
+    lager_best: Dict[tuple, tuple] = {}
+    lager_punkte: Dict[tuple, List[PrognosePunkt]] = {}
     rows_total, skipped = 0, 0
 
     with open(path, "r", encoding=profile.encoding, newline="") as fh:
@@ -295,9 +312,36 @@ def load_prognose_csv(path: Path, profile: Profile, flotte: Flotte) -> int:
                 _parse_int(_get(row, idx, "dg_id")),
                 _parse_int(_get(row, idx, "rs_id")),
             )
-            if axis_by_ids.get(key_axis) is None:
-                skipped += 1
-                continue
+            ausbau_s = _get(row, idx, "ausbau")
+            is_lager = bool(ausbau_s and ausbau_s.strip())
+
+            if is_lager:
+                rs_id = key_axis[2]
+                if rs_id is None:
+                    skipped += 1
+                    continue
+                if rs_id not in lager_axle_by_rsid and rs_id not in lager_dg_axle_by_rsid:
+                    skipped += 1
+                    continue
+            else:
+                if axis_by_ids.get(key_axis) is None:
+                    skipped += 1
+                    continue
+
+            datum = _parse_datetime(_get(row, idx, "datum"), profile.date_format)
+            stand = _parse_float(_get(row, idx, "stand"), profile.decimal)
+            lauf = _parse_float(_get(row, idx, "laufleistung"), profile.decimal)
+            if is_lager:
+                key_full = (key_axis[2], side, mdef.name)
+            else:
+                key_full = (key_axis, side, mdef.name)
+
+            if datum is not None and stand is not None:
+                pp = PrognosePunkt(datum=datum, stand=stand, laufleistung=lauf)
+                if is_lager:
+                    lager_punkte.setdefault(key_full, []).append(pp)
+                else:
+                    punkte.setdefault(key_full, []).append(pp)
 
             prog = Prognose(
                 km_warnwert=_parse_float(_get(row, idx, "km_warnwert"), profile.decimal),
@@ -310,16 +354,15 @@ def load_prognose_csv(path: Path, profile: Profile, flotte: Flotte) -> int:
             # Score fuer "jüngste" Prognose: AKTUELL > letzteaendzeit > datum
             aktuell = _parse_int(_get(row, idx, "aktuell")) or 0
             laend = _parse_datetime(_get(row, idx, "letzteaendzeit"), profile.date_format)
-            datum = _parse_datetime(_get(row, idx, "datum"), profile.date_format)
             score = (
                 aktuell,
                 laend.timestamp() if laend else 0,
                 datum.timestamp() if datum else 0,
             )
-            key_full = (key_axis, side, mdef.name)
-            prev = best.get(key_full)
+            store = lager_best if is_lager else best
+            prev = store.get(key_full)
             if prev is None or score > prev[0]:
-                best[key_full] = (score, prog)
+                store[key_full] = (score, prog)
 
     attached = 0
     for (key_axis, side, mg_name), (_score, prog) in best.items():
@@ -332,9 +375,58 @@ def load_prognose_csv(path: Path, profile: Profile, flotte: Flotte) -> int:
         if mr is None:
             skipped += 1
             continue
+        raw = punkte.get((key_axis, side, mg_name), [])
+        prog.punkte = _dedupe_treppe(raw)
         mr.prognose = prog
         attached += 1
 
-    log.info("Prognose-CSV: %d Zeilen gelesen, %d Messreihen angereichert, %d uebersprungen",
-             rows_total, attached, skipped)
-    return attached
+    attached_lager = 0
+    for (rs_id, side, mg_name), (_score, prog) in lager_best.items():
+        rad = None
+        if rs_id in lager_axle_by_rsid:
+            comp = lager_axle_by_rsid[rs_id]
+            rad = comp.raeder.get(side)
+        elif rs_id in lager_dg_axle_by_rsid:
+            _comp, inner_axle = lager_dg_axle_by_rsid[rs_id]
+            rad = inner_axle.raeder.get(side)
+        if rad is None:
+            skipped += 1
+            continue
+        mr = rad.messreihen.get(mg_name)
+        if mr is None:
+            skipped += 1
+            continue
+        raw = lager_punkte.get((rs_id, side, mg_name), [])
+        prog.punkte = _dedupe_treppe(raw)
+        mr.prognose = prog
+        attached_lager += 1
+
+    log.info(
+        "Prognose-CSV: %d Zeilen gelesen, %d eingebaut + %d Lager angereichert, %d uebersprungen",
+        rows_total, attached, attached_lager, skipped,
+    )
+    return attached + attached_lager
+
+
+def _dedupe_treppe(raw: List[PrognosePunkt]) -> List[PrognosePunkt]:
+    """Sortiert aufsteigend nach Datum und entfernt Duplikate.
+
+    Bei zwei Punkten mit gleichem Datum bleibt die Reihenfolge der
+    verbleibenden Punkte so, dass der groessere ``stand``-Wert zuerst
+    kommt und der kleinere danach. Das macht aus einem Reprof-Doppel
+    (vor/nach) einen sauberen senkrechten Sprung nach unten im
+    verbundenen Linienzug.
+    """
+    seen = set()
+    uniq = []
+    for p in raw:
+        key = (p.datum, round(p.stand, 4),
+               round(p.laufleistung, 2) if p.laufleistung is not None else None)
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(p)
+    # Primaer nach Datum; sekundaer absteigend nach Stand (hoeherer Wert zuerst,
+    # damit Reprof-Paare als "vor → nach"-Reihenfolge erscheinen).
+    uniq.sort(key=lambda p: (p.datum, -p.stand))
+    return uniq

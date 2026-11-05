@@ -485,8 +485,30 @@ def _simulate_with_reprofilings(
         lkd_after_reprof = lkd_at_reprof - reprof_magnitude_mm
 
         if lkd_after_reprof <= min_val:
-            # Reprofilierung würde unter MIN fallen → kein sicherer Eingriff mehr möglich
-            km_limit = km_next_reprof
+            # Reprofilierung würde unter MIN fallen → kein sicherer Eingriff mehr möglich.
+            # Linie aber bis MIN verlaengern (statt bei lkd_at_reprof oberhalb MIN
+            # abzubrechen), damit die Prognose vollstaendig bis zur Verschleissgrenze
+            # dokumentiert ist. Analog zur alten Dashboard-Live-Logik
+            # (project_with_reprofs, Fall B).
+            #
+            # Begrenzung: bei sehr flachen Trend-Steigungen (z.B. Lagerachsen
+            # mit kaum Abrieb) kann (min_val - lkd_at_reprof) / slope ins
+            # Astronomische laufen. Harte Obergrenze = 1x reprof_interval_km.
+            # Reicht die Verlaengerung nicht aus, um MIN zu erreichen, endet
+            # die Treppe halt bei dem erreichbaren Wert — die Prognose ist
+            # dann fachlich sowieso wenig aussagekraeftig.
+            if slope < 0:
+                extra_km_raw = (min_val - lkd_at_reprof) / slope  # positiv, slope<0
+                extra_km = min(extra_km_raw, reprof_interval_km)
+                km_end = km_next_reprof + extra_km
+                lkd_end = lkd_at_reprof + slope * extra_km
+                for km_pt in np.linspace(km_next_reprof, km_end, n_pts_per_segment):
+                    km_pts.append(float(km_pt))
+                    lkd_pts.append(float(lkd_at_reprof + slope * (km_pt - km_next_reprof)))
+                # km_limit nur setzen, wenn MIN tatsaechlich erreicht wurde.
+                km_limit = km_end if lkd_end <= min_val + 1e-6 else km_next_reprof
+            else:
+                km_limit = km_next_reprof
             break
 
         if km_warn is None and lkd_after_reprof <= gelb_min:
@@ -690,7 +712,16 @@ def _calc_prognosis_axis(
             axis_key,
         )
 
-    km_end_prog = km_limit if km_limit else (last_km + n_km_horizon)
+    # km_end_prog begrenzen: bei sehr flachen Trend-Steigungen (z.B.
+    # Lagerachsen mit kaum Abrieb) wuerde km_limit astronomisch, der
+    # Prognose-Horizont waere Millionen von km lang und das KI-Band im
+    # Plot unleserlich. Harte Obergrenze: last_km + n_km_horizon
+    # (Default 300.000 km aus radsatz_config.ini).
+    km_max_horizon = last_km + n_km_horizon
+    if km_limit is not None and last_km < km_limit < km_max_horizon:
+        km_end_prog = km_limit
+    else:
+        km_end_prog = km_max_horizon
     km_prog = np.linspace(last_km, km_end_prog, num=prm.n_prog_points)
 
     if model == "LINEAR":
@@ -700,7 +731,11 @@ def _calc_prognosis_axis(
 
     days_per_km = _calc_days_per_km_robust(km_cycle, date_cycle, axis_key)
 
-    # last_date als np.datetime64-Skalar; date_prog als datetime64-Array
+    # last_date als np.datetime64-Skalar; date_prog als datetime64-Array.
+    # Alle Prognose-Datumswerte (Treppe, Warn/Grenz) sind an das echte
+    # letzte Messdatum geankert. Die Verschiebung auf "heute" fuer
+    # ruhende Raeder passiert ausschliesslich im Dashboard, und auch
+    # dort nur in der Faelligkeits-Kachel — nicht im Diagramm.
     last_date = date_cycle[-1]
     date_prog = last_date + days_to_timedelta64((km_prog - last_km) * days_per_km)
 

@@ -47,6 +47,7 @@ columns_prognose:
   KM_GRENZWERT: km_grenzwert
   DATUM_GRENZWERT: datum_grenzwert
   AKTUELL: aktuell
+  AUSBAU: ausbau
 
 required_measurement_fields:
   base: [datum, stand]

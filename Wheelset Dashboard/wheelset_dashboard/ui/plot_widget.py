@@ -66,6 +66,36 @@ def _km_formatter(v, _pos=None):
     return f"{v:.0f} km"
 
 
+def _find_crossing(points, y_val, x_mode, get_x, get_y):
+    """Findet den X-Wert, an dem eine Punktfolge absteigend den Y-Wert
+    ``y_val`` erreicht bzw. unterschreitet.
+
+    Allgemeine Suche in einer sortierten Punkt-Folge (Treppe oder
+    Historie). Reprof-Spruenge (gleiches X, Y springt nach unten) werden
+    beruecksichtigt. Gibt None zurueck, wenn die Linie den Y-Wert nicht
+    (absteigend) kreuzt.
+    """
+    if y_val is None or not points:
+        return None
+    xs = [get_x(p) for p in points]
+    ys = [get_y(p) for p in points]
+    if any(x is None for x in xs) or any(y is None for y in ys):
+        return None
+    for i in range(1, len(xs)):
+        y_a, y_b = ys[i - 1], ys[i]
+        x_a, x_b = xs[i - 1], xs[i]
+        if x_a == x_b:
+            if y_a >= y_val >= y_b:
+                return x_a
+            continue
+        if y_a >= y_val and y_b <= y_val:
+            if y_a == y_b:
+                return x_a
+            frac = (y_a - y_val) / (y_a - y_b)
+            return x_a + (x_b - x_a) * frac
+    return None
+
+
 class PlotCanvas(FigureCanvasQTAgg):
     def __init__(self, parent=None):
         fig = Figure(figsize=(8, 4), tight_layout=True, facecolor="#FFFFFF")
@@ -136,214 +166,182 @@ class PlotCanvas(FigureCanvasQTAgg):
                 if mp.gelb_min is not None: all_gelb_min.append(mp.gelb_min)
                 if mp.gelb_max is not None: all_gelb_max.append(mp.gelb_max)
 
-        # Prognose-Visualisierung: entweder Treppen-Prognose aus der lokalen
-        # Logik (wenn PrognoseConfig gegeben + Treppen/CI aktiv). Modus-
-        # unabhaengig: im km-Modus direkt, im Datum-Modus ueber km->Datum.
-        use_ci = (prognose_config is not None
-                  and getattr(prognose_config, "show_ci_band", False))
-
-        # Prognose-Algorithmus (project_with_reprofs + ci_band) ist nur fuer
-        # LKD validiert — der Zyklus-Fit, die Reprof-Erkennung und das
-        # Treppen-Modell beruhen auf dem Verschleissverhalten des
-        # Laufkreisdurchmessers. Fuer andere Messgroessen (Sd, Sh, Spur,
-        # Stichmass …) gibt es dafuer kein Modell → wir zeichnen keine
-        # Prognose und zeigen stattdessen einen Hinweis.
+        # Prognose-Visualisierung: ausschliesslich aus mr.prognose.
+        # Die Prognose-Tabelle liefert die komplette Treppenkurve pro Rad
+        # (prog.punkte = Liste von PrognosePunkt(datum, stand, laufleistung)).
+        # Reprofilierungssprünge sind in der Liste als zwei Punkte am
+        # selben Datum enthalten (erst "vor-Reprof", dann "nach-Reprof"),
+        # ein verbundener Linienzug erzeugt dadurch automatisch den
+        # senkrechten Sprung nach unten.
+        #
+        # Als Fallback — wenn die Treppen-Punkte fehlen (z.B. nach einem
+        # Oracle-Lauf mit nur Endpunkten) — wird die klassische 3-Punkt-
+        # Linie (letzter Messwert → Warn → Grenz) gezeichnet.
+        #
+        # Prognose-Darstellung ist nur fuer LKD definiert; fuer alle anderen
+        # Messgroessen (Sd, Sh, Spur, Stichmass …) gibt es keine Prognose
+        # in der Tabelle.
         messgroesse = next((mr.messgroesse for _, mr, _ in reihen if mr), None)
         prognose_supported = (messgroesse == "LKD")
         prognose_drawn = False
+        self._prognose_info = []   # Infotext-Daten je Rad: (label, prognose)
 
-        # Treppen-Prognose: im km-Modus direkt; im Datum-Modus ueber km->Datum-
-        # Umrechnung (km/Tag aus der Historie geschaetzt).
-        use_steps_any = (prognose_config is not None
-                         and getattr(prognose_config, "show_reprof_steps", False)
-                         and prognose_supported)
-        self._prognose_info = []   # Infotext-Daten je Rad
-        if use_steps_any:
-            from ..logic.prognose import (
-                project_with_reprofs, ci_band, effective_params, crossings,
-                cycle_fit,
-            )
-            # Fuer Schwellen-Marker: GELB_MIN und MIN sammeln
-            _gelb_min = max([mp.gelb_min for _, mr, _ in reihen
-                             for mp in mr.historie if mp.gelb_min is not None], default=None)
-            _min_v = max([mp.min_val for _, mr, _ in reihen
-                          for mp in mr.historie if mp.min_val is not None], default=None)
-            for side, mr, prog in reihen:
-                if not mr.historie:
-                    continue
-                col = SIDE_COLORS.get(side, COL_UNSPEC)
-                treppen = project_with_reprofs(mr, prognose_config, flotte=flotte, achse=achse)
-                if not treppen:
-                    continue
-                prognose_drawn = True
-                xs_km = [t[0] for t in treppen]
-                ys = [t[1] for t in treppen]
-                km_per_day = _estimate_km_per_day(mr)
-                letzt_mp = max(mr.historie, key=lambda mp: mp.datum)
-                def _km_to_x(km):
-                    if x_mode == "km":
-                        return km
-                    if km_per_day is None or km_per_day <= 0 or letzt_mp.laufleistung is None:
-                        return None
-                    return letzt_mp.datum + timedelta(days=(km - letzt_mp.laufleistung) / km_per_day)
-                if x_mode == "km":
-                    xs = xs_km
-                else:
-                    if km_per_day is None or km_per_day <= 0 or letzt_mp.laufleistung is None:
-                        continue
-                    xs = [_km_to_x(k) for k in xs_km]
-                ax.plot(xs, ys, color=col, linestyle="--", linewidth=1.5,
-                        marker="", zorder=2,
-                        label=f"Prognose {SIDE_LABEL.get(side, side).lower()} (mit Reprof.)")
-                # Marker an Schnittpunkten mit Warn- und Grenzschwelle
-                for y_lvl, m_col, m_marker in ((_gelb_min, COL_WARN, "o"),
-                                                (_min_v, COL_GRENZ, "D")):
-                    if y_lvl is None:
-                        continue
-                    for km_cross, y_cross in crossings(treppen, y_lvl):
-                        x_c = _km_to_x(km_cross)
-                        if x_c is None:
-                            continue
-                        ax.plot([x_c], [y_cross], marker=m_marker, markersize=7,
-                                markerfacecolor=col, markeredgecolor=m_col,
-                                markeredgewidth=1.5, zorder=4)
-                # Prognose-Parameter fuer Infotext sammeln
-                params = effective_params(mr, prognose_config, flotte=flotte, achse=achse)
-                self._prognose_info.append(
-                    (SIDE_LABEL.get(side, side),
-                     params.typical_interval_km, params.typical_magnitude_mm)
-                )
-                # KI-Band parallel zur Treppen-Prognose:
-                # Breite waechst linear mit (km - km_start), aber bei jedem
-                # Reprof-Sprung verschiebt sich das Band gemeinsam mit der
-                # Treppenprognose nach unten. Pro Treppen-Punkt wird der
-                # Offset (slope_low/high − slope) × dkm auf die Treppen-y
-                # addiert → Band folgt den Stufen.
-                if use_ci:
-                    fit = cycle_fit(mr, prognose_config, flotte=flotte, achse=achse)
-                    cb = ci_band(mr, prognose_config,
-                                 [letzt_mp.laufleistung, letzt_mp.laufleistung + 1.0],
-                                 flotte=flotte, achse=achse)
-                    min_v = letzt_mp.min_val
-                    if fit is not None and cb is not None and min_v is not None:
-                        slope = fit[0]
-                        lower_pair, upper_pair = cb
-                        slope_hi_band = (lower_pair[1] - lower_pair[0]) / 1.0   # faellt staerker
-                        slope_lo_band = (upper_pair[1] - upper_pair[0]) / 1.0   # faellt schwaecher
-                        km_start = letzt_mp.laufleistung
-
-                        # Pro Treppen-Punkt: oberer/unterer Rand als Offset
-                        # auf die Treppen-y. Dadurch folgen BEIDE Raender
-                        # den Reprof-Stufen gemeinsam nach unten.
-                        band_km = list(xs_km)
-                        band_y = list(ys)
-                        band_lower, band_upper = [], []
-                        for km_i, lkd_i in zip(band_km, band_y):
-                            dkm = km_i - km_start
-                            delta_lo = (slope_hi_band - slope) * dkm
-                            delta_hi = (slope_lo_band - slope) * dkm
-                            band_lower.append(lkd_i + delta_lo)
-                            band_upper.append(lkd_i + delta_hi)
-
-                        # Band bis zur MIN-Linie fuehren: wenn die OBERE
-                        # Kurve am letzten Treppen-Punkt noch ueber MIN liegt,
-                        # ergaenzen wir einen Tail-Punkt rechts, bei dem der
-                        # obere Rand genau auf MIN liegt. Unterer Rand wird
-                        # dort und ueberall auf MIN gecappt.
-                        if band_upper[-1] > min_v and slope_lo_band < 0:
-                            km_tail = band_km[-1] + (min_v - band_upper[-1]) / slope_lo_band
-                            if km_tail > band_km[-1]:
-                                dkm_tail = km_tail - km_start
-                                y_tail = band_y[-1] + slope * (km_tail - band_km[-1])
-                                band_km.append(km_tail)
-                                band_y.append(y_tail)
-                                band_lower.append(y_tail + (slope_hi_band - slope) * dkm_tail)
-                                band_upper.append(y_tail + (slope_lo_band - slope) * dkm_tail)
-                        # Unterer Rand bei MIN cappen (nie unter MIN)
-                        band_lower = [max(v, min_v) for v in band_lower]
-                        band_upper = [max(v, min_v) for v in band_upper]
-
-                        if x_mode == "km":
-                            band_x = band_km
-                        else:
-                            band_x = [_km_to_x(k) for k in band_km]
-                        ax.fill_between(band_x, band_lower, band_upper,
-                                        color=col, alpha=0.12, zorder=1,
-                                        label=f"KI-Band {int(prognose_config.ci_level*100)} % "
-                                              f"{SIDE_LABEL.get(side, side).lower()}")
-
-        # Fallback / zusaetzliche einfache Prognose-Linie
-        # (nur fuer prognose-faehige Reihen, aktuell nur LKD).
-        # Linie durch die beiden Prognose-Anker (Warn-Punkt bei GELB_MIN, Grenz-Punkt bei MIN),
-        # verlaengert bis zum letzten Messpunkt. So entspricht die Linie der tatsaechlichen
-        # Trend-Vorhersage und trifft die horizontalen Schwellen genau an den Prognose-Datumsmarken.
-        _skip_linear = use_steps_any or not prognose_supported
         for side, mr, prog in reihen:
-            if _skip_linear:
+            if not prognose_supported:
                 break
             if prog is None or not mr.historie:
                 continue
             letzt = max(mr.historie, key=lambda mp: mp.datum)
             col = SIDE_COLORS.get(side, COL_UNSPEC)
 
-            # Steigung aus den beiden Prognose-Ankern (Warn-Punkt bei GELB_MIN,
-            # Grenz-Punkt bei MIN). Linie startet am LETZTEN REALEN MESSWERT
-            # und laeuft mit dieser Steigung weiter bis zum Grenzpunkt.
-            if x_mode == "datum":
-                dg_x = prog.datum_grenzwert
-                dw_x = prog.datum_warnwert
-                if dg_x is None:
-                    continue
-                y_grenz = letzt.min_val if letzt.min_val is not None else letzt.stand - 15
-                y_warn = letzt.gelb_min
-                if dw_x is not None and y_warn is not None and dw_x != dg_x:
-                    span_days = (dg_x - dw_x).days or 1
-                    slope = (y_grenz - y_warn) / span_days   # mm pro Tag
-                    # Linie beginnt am letzten Messwert; errechne, wo sie die Grenze erreicht
-                    if slope != 0:
-                        days_to_grenz = (y_grenz - letzt.stand) / slope
-                        x_grenz_reached = letzt.datum + timedelta(days=days_to_grenz)
+            punkte = list(getattr(prog, "punkte", []) or [])
+
+            # Treppe am ersten absteigenden Erreichen von MIN abschneiden.
+            # Das Backend liefert die Treppe bis MIN (siehe
+            # ``_simulate_with_reprofilings`` in prognosis_new_core.py);
+            # das Trimmen hier dient nur als Sicherheitsnetz fuer evtl.
+            # alte Prognose-Zeilen, die noch ueber MIN hinauslaufen.
+            if punkte and letzt.min_val is not None:
+                from ..data.models import PrognosePunkt as _PP
+                trimmed: List[_PP] = []
+                min_v = letzt.min_val
+                for i, p in enumerate(punkte):
+                    if not trimmed:
+                        trimmed.append(p)
+                        continue
+                    prev = trimmed[-1]
+                    if prev.stand >= min_v and p.stand < min_v:
+                        if prev.datum == p.datum:
+                            trimmed.append(_PP(datum=p.datum, stand=min_v,
+                                                laufleistung=p.laufleistung))
+                        else:
+                            frac = (prev.stand - min_v) / (prev.stand - p.stand)
+                            new_datum = prev.datum + (p.datum - prev.datum) * frac
+                            new_lauf = None
+                            if prev.laufleistung is not None and p.laufleistung is not None:
+                                new_lauf = prev.laufleistung + (p.laufleistung - prev.laufleistung) * frac
+                            trimmed.append(_PP(datum=new_datum, stand=min_v, laufleistung=new_lauf))
+                        break
+                    trimmed.append(p)
+                punkte = trimmed
+
+            # Linie bauen. Primaerer Weg: die aus der Prognose-Tabelle
+            # geladene Treppe. Beginnend bei dem Punkt, der direkt vor dem
+            # letzten echten Messwert liegt — so laeuft die Treppe nahtlos
+            # aus der Historie heraus.
+            if punkte:
+                if x_mode == "km":
+                    xs_vals = [p.laufleistung for p in punkte]
+                    if any(v is None for v in xs_vals):
+                        xs_vals = None
                     else:
-                        x_grenz_reached = dg_x
-                    y_at_warn = (letzt.stand + slope * (dw_x - letzt.datum).days
-                                 if dw_x > letzt.datum else None)
-                    xs = [letzt.datum]
-                    ys = [letzt.stand]
-                    if y_at_warn is not None:
-                        xs.append(dw_x); ys.append(y_at_warn)
-                    xs.append(x_grenz_reached)
-                    ys.append(y_grenz)
-                else:
-                    xs = [letzt.datum, dg_x]
-                    ys = [letzt.stand, y_grenz]
-                ax.plot(xs, ys, color=col, linestyle="--", linewidth=1.3,
-                        marker="x", markersize=5, zorder=2,
-                        label=f"Prognose {SIDE_LABEL.get(side, side).lower()}")
-            elif x_mode == "km" and letzt.laufleistung is not None:
-                kg = prog.km_grenzwert
-                kw = prog.km_warnwert
-                if kg is None:
-                    continue
-                y_grenz = letzt.min_val if letzt.min_val is not None else letzt.stand - 15
+                        ys_vals = [p.stand for p in punkte]
+                else:   # datum
+                    xs_vals = [p.datum for p in punkte]
+                    ys_vals = [p.stand for p in punkte]
+                if xs_vals is not None:
+                    ax.plot(xs_vals, ys_vals, color=col, linestyle="--",
+                            linewidth=1.3, marker="", zorder=2,
+                            label=f"Prognose {SIDE_LABEL.get(side, side).lower()}")
+                    prognose_drawn = True
+            else:
+                # Fallback: 3-Punkt-Linie aus Endpunkten.
                 y_warn = letzt.gelb_min
-                if kw is not None and y_warn is not None and kw != kg:
-                    slope = (y_grenz - y_warn) / (kg - kw)
-                    # Linie beginnt am letzten Messwert; errechne, wo sie die
-                    # Grenze erreicht (= wo die Linie y_grenz schneidet)
-                    x_grenz_reached = letzt.laufleistung + (y_grenz - letzt.stand) / slope if slope != 0 else kg
-                    y_at_warn = letzt.stand + slope * (kw - letzt.laufleistung) if kw > letzt.laufleistung else None
-                    xs = [letzt.laufleistung]
-                    ys = [letzt.stand]
-                    if y_at_warn is not None:
-                        xs.append(kw); ys.append(y_at_warn)
-                    xs.append(x_grenz_reached)
-                    ys.append(y_grenz)
+                y_grenz = letzt.min_val
+                if x_mode == "datum":
+                    x_start, y_start = letzt.datum, letzt.stand
+                    dw, dg = prog.datum_warnwert, prog.datum_grenzwert
+                    pts: List[Tuple[datetime, float]] = [(x_start, y_start)]
+                    if dw is not None and y_warn is not None and dw > x_start:
+                        pts.append((dw, y_warn))
+                    if dg is not None and y_grenz is not None and dg > x_start:
+                        pts.append((dg, y_grenz))
+                elif x_mode == "km" and letzt.laufleistung is not None:
+                    x_start, y_start = letzt.laufleistung, letzt.stand
+                    kw, kg = prog.km_warnwert, prog.km_grenzwert
+                    pts = [(x_start, y_start)]
+                    if kw is not None and y_warn is not None and kw > x_start:
+                        pts.append((kw, y_warn))
+                    if kg is not None and y_grenz is not None and kg > x_start:
+                        pts.append((kg, y_grenz))
                 else:
-                    xs = [letzt.laufleistung, kg]
-                    ys = [letzt.stand, y_grenz]
-                ax.plot(xs, ys, color=col, linestyle="--", linewidth=1.3,
-                        marker="x", markersize=5, zorder=2,
-                        label=f"Prognose {SIDE_LABEL.get(side, side).lower()}")
+                    pts = []
+                if len(pts) >= 2:
+                    ax.plot([p[0] for p in pts], [p[1] for p in pts],
+                            color=col, linestyle="--", linewidth=1.3,
+                            marker="", zorder=2,
+                            label=f"Prognose {SIDE_LABEL.get(side, side).lower()}")
+                    prognose_drawn = True
+
+            # Marker an den Prognose-Endpunkten (Warn: Kreis, Grenz: Raute).
+            # Sie werden auf der PROGNOSE-TREPPE platziert — an der Stelle,
+            # wo die Treppe den Warn- bzw. Grenz-Y-Wert (gelb_min bzw.
+            # min_val) absteigend kreuzt. So sitzt der Marker immer auf
+            # der Linie, auch bei ruhenden Raedern (Treppe ab letztem
+            # Messwert; prog.datum_warnwert/grenzwert liegen dagegen in
+            # der Zukunft und werden daher NICHT fuer den Marker benutzt).
+            # Fallback auf die Tabellenwerte, wenn keine Treppe vorhanden
+            # ist (3-Punkt-Linie).
+            def _x_at_y(y_val):
+                """Findet den X-Wert, an dem die Treppe erstmals absteigend
+                den Y-Wert ``y_val`` erreicht bzw. unterschreitet.
+
+                - Reprof-Spruenge (gleiches X, Y springt nach unten) werden
+                  uebersprungen; stattdessen wird der Punkt NACH dem Sprung
+                  bewertet.
+                - Ein Punkt der Treppe, der GENAU auf ``y_val`` liegt (z.B.
+                  letzter Punkt nach Trim bei MIN), zaehlt als Erreichen.
+                - Falls die Treppe erst innerhalb eines Reprof-Sprungs
+                  (vertikal) durch y_val geht, wird das X des Sprungs
+                  zurueckgegeben.
+                """
+                return _find_crossing(punkte, y_val, x_mode,
+                                        get_x=(lambda p: p.datum) if x_mode == "datum"
+                                              else (lambda p: p.laufleistung),
+                                        get_y=lambda p: p.stand)
+
+            def _x_at_y_history(y_val):
+                """Fallback: Kreuzpunkt in der HISTORIE suchen (nur wenn
+                die Prognose-Treppe keinen liefert — typisch bei
+                Lagerkomponenten, deren Prognose-Treppe schon unter der
+                Schwelle startet, die aber in der Historie durch die
+                Schwelle gelaufen sind)."""
+                return _find_crossing(mr.historie, y_val, x_mode,
+                                        get_x=(lambda mp: mp.datum) if x_mode == "datum"
+                                              else (lambda mp: mp.laufleistung),
+                                        get_y=lambda mp: mp.stand)
+
+            def _marker(x_val, y_val, m_col, m_marker):
+                if x_val is None or y_val is None:
+                    return
+                ax.plot([x_val], [y_val], marker=m_marker, markersize=8,
+                        markerfacecolor=col, markeredgecolor=m_col,
+                        markeredgewidth=1.5, zorder=4, linestyle="")
+            # Y-Werte der Marker = Schwellen aus dem letzten Messpunkt
+            y_warn = letzt.gelb_min
+            y_grenz = letzt.min_val
+            # Erst in der Prognose-Treppe suchen; falls dort nichts (z.B.
+            # Lagerkomponente mit Treppe die schon unter Schwelle startet),
+            # in der Historie suchen; letzter Fallback: Prognose-Tabellen-km.
+            if x_mode == "datum":
+                x_warn = _x_at_y(y_warn)
+                if x_warn is None:
+                    x_warn = _x_at_y_history(y_warn) or prog.datum_warnwert
+                x_grenz = _x_at_y(y_grenz)
+                if x_grenz is None:
+                    x_grenz = _x_at_y_history(y_grenz) or prog.datum_grenzwert
+            else:
+                x_warn = _x_at_y(y_warn)
+                if x_warn is None:
+                    x_warn = _x_at_y_history(y_warn) or prog.km_warnwert
+                x_grenz = _x_at_y(y_grenz)
+                if x_grenz is None:
+                    x_grenz = _x_at_y_history(y_grenz) or prog.km_grenzwert
+            _marker(x_warn, y_warn, COL_WARN, "o")
+            _marker(x_grenz, y_grenz, COL_GRENZ, "D")
+
+            if prognose_drawn:
+                self._prognose_info.append((SIDE_LABEL.get(side, side), prog))
 
         # Horizontale Schwellen — alle vier Werte zeichnen, soweit die CSV
         # sie liefert. Die ``direction`` steuert nur die Status-Berechnung,

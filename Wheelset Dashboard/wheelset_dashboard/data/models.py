@@ -59,6 +59,20 @@ class Prognose:
     datum_grenzwert: Optional[datetime] = None
     methode: Optional[str] = None
     qualitaet: Quality = Quality.NOT_APPLICABLE
+    # Komplette Treppenkurve aus der Prognose-Tabelle als
+    # (datum, lkd_stand, laufleistung_km). Zeitlich aufsteigend sortiert;
+    # Reprofilierungen erscheinen als zwei Punkte am selben Datum
+    # (erst der hoehere "vor"-Wert, dann der niedrigere "nach"-Wert),
+    # sodass ein verbindender Linienzug einen senkrechten Sprung
+    # nach unten zeichnet.
+    punkte: List["PrognosePunkt"] = field(default_factory=list)
+
+
+@dataclass
+class PrognosePunkt:
+    datum: datetime
+    stand: float
+    laufleistung: Optional[float] = None
 
 
 @dataclass

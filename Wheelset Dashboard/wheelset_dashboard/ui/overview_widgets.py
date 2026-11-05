@@ -110,20 +110,49 @@ class GanttCanvas(FigureCanvasQTAgg):
         Keine obere Deckelung — der Scrollbalken im GanttPane uebernimmt
         die sichtbare Begrenzung.
 
-        Setzt auch die Pixelhoehe des Widgets und die Figure-Groesse
-        explizit, damit matplotlib beim ersten Draw nach einem
-        View-Wechsel schon mit den richtigen Dimensionen rechnet
-        (sonst wirkten die Zeilenabstaende beim ersten Betreten zu eng).
+        Die BREITE kommt aus dem umgebenden QScrollArea-Viewport (nicht
+        aus ``self.width()``), damit nach einem View-Wechsel die Canvas
+        sich an die aktuelle Fensterbreite anpasst — sonst zeichnet
+        matplotlib in der alten (kleineren) Breite und rechts bleibt ein
+        leerer Bereich.
         """
         n = max(1, n_rows)
         px = max(140, 60 + n * 22)
         self.setMinimumHeight(px)
         self.setMaximumHeight(px)
-        w = max(self.width(), 100)
+        # Verfuegbare Breite aus dem Scrollviewport des Panes ermitteln.
+        pane = getattr(self, "_pane", None)
+        scroll = getattr(pane, "_scroll", None) if pane is not None else None
+        if scroll is not None:
+            vp_w = scroll.viewport().width()
+            # Bei aktivem vertikalen Scrollbar die Scrollbar-Breite abziehen
+            sb = scroll.verticalScrollBar()
+            if sb is not None and sb.isVisible():
+                vp_w -= sb.sizeHint().width()
+            w = max(vp_w, max(self.width(), 100))
+        else:
+            w = max(self.width(), 100)
         self.resize(w, px)
         dpi = self.figure.dpi or 100
         self.figure.set_size_inches(w / dpi, px / dpi, forward=False)
         self._apply_margins()
+
+    def resizeEvent(self, event):
+        """Bei jeder Widget-Groessenaenderung die Figure-Breite synchron
+        halten. QScrollArea mit ``setWidgetResizable(True)`` aendert die
+        Canvas-Breite beim Fenster-Resize — matplotlib's Figure muss
+        dann mitwachsen, sonst bleibt der Plot in der alten Breite und
+        rechts erscheint eine leere Flaeche."""
+        super().resizeEvent(event)
+        dpi = self.figure.dpi or 100
+        w = max(event.size().width(), 100)
+        h = max(event.size().height(), 100)
+        # nur neu setzen, wenn sich die Zielgroesse wirklich aendert
+        cur_w, cur_h = self.figure.get_size_inches()
+        if abs(cur_w - w / dpi) > 1e-3 or abs(cur_h - h / dpi) > 1e-3:
+            self.figure.set_size_inches(w / dpi, h / dpi, forward=False)
+            self._apply_margins()
+            self.draw_idle()
 
     def _apply_margins(self):
         """Setzt die Plot-Area-Raender fest in Pixel (umgerechnet in

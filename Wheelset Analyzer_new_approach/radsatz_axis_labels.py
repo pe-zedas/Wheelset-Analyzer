@@ -20,25 +20,48 @@ def make_axis_key(
     te_or_row: RowLike,
     dg: str | None = None,
     rs: str | None = None,
+    rseinheitid=None,
 ) -> str:
-    """Achsschlüssel aus Messzeile oder (TOPEINHEITBEZEICHNUNG, DGEINBAUPOS, RSEINBAUPOS)."""
+    """Achsschlüssel aus Messzeile oder (TOPEINHEITBEZEICHNUNG, DGEINBAUPOS, RSEINBAUPOS).
+
+    Fuer EINGEBAUTE Raeder bleibt der Schluessel wie bisher (TE, DG, RS) —
+    an jeder Einbauposition sitzt zu jedem Zeitpunkt genau eine Achse.
+
+    Fuer AUSGEBAUTE Raeder (Lager) wird zusaetzlich die physische Achs-ID
+    (RSEINHEITID) angehaengt, sodass jede Achse ihren eigenen Schluessel
+    bekommt — auch wenn mehrere Achsen ueber die Jahre dieselbe Position
+    besetzt hatten.
+    """
     if dg is None and rs is None:
         row = te_or_row
         te, dg, rs = row[0], row[1], row[2]
     else:
         te = te_or_row
-    return AXIS_KEY_SEP.join(
-        [
-            (str(te) if te is not None else "").strip(),
-            (str(dg) if dg is not None else "").strip(),
-            (str(rs) if rs is not None else "").strip(),
-        ]
-    )
+    parts = [
+        (str(te) if te is not None else "").strip(),
+        (str(dg) if dg is not None else "").strip(),
+        (str(rs) if rs is not None else "").strip(),
+    ]
+    if rseinheitid is not None:
+        # Normalisieren: "17380402", "17380402.0" oder 17380402.0 muessen
+        # denselben Key-Teil ergeben. Erst in float, dann in int (ohne
+        # Nachkommastellen), dann in str — robust gegen CSV-Parser-Varianten.
+        try:
+            rid_norm = str(int(float(rseinheitid)))
+        except (TypeError, ValueError):
+            rid_norm = str(rseinheitid).strip()
+        if rid_norm:
+            parts.append(rid_norm)
+    return AXIS_KEY_SEP.join(parts)
 
 
 def parse_axis_key(key: str) -> Tuple[str, str, str]:
+    """Zerlegt den Schluessel. Eine evtl. angehaengte RSEINHEITID
+    (Lagerkomponente) wird ignoriert — diese Funktion liefert weiterhin
+    nur (TE, DG, RS) wie bisher, damit bestehende Aufrufer unveraendert
+    bleiben."""
     if AXIS_KEY_SEP in key:
-        parts = key.split(AXIS_KEY_SEP, 2)
+        parts = key.split(AXIS_KEY_SEP)
         while len(parts) < 3:
             parts.append("")
         return parts[0], parts[1], parts[2]

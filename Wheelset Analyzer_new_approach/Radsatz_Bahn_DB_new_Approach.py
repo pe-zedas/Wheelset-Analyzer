@@ -35,7 +35,7 @@ from dates_np import (
     timedelta64_to_days,
     to_datetime64_array,
 )
-from toolsWheelset import getStartIndexLastCycle
+from toolsWheelset import getPositiveJumpIndices, getStartIndexLastCycle
 from MeterList import MeterList
 from VehicleAxis import VehicleAxis
 from radsatz_settings import (
@@ -72,10 +72,12 @@ from prognosis_new_core import (
     _PrognResult,
     _calc_prognosis_axis,
     _calc_prognosis_axis_pair,
+    _simulate_with_reprofilings,
     prognosis_params_from_radsatz_config,
     set_prognosis_params,
 )
 from reprof_learning import (
+    get_reprofiling_params,
     learn_reprofiling_params,
     learn_reprofiling_params_per_axis,
     reprofiling_params_from_radsatz_config,
@@ -215,6 +217,174 @@ def _collect_baureihe_mean_slopes(
         if arr.size:
             out[k] = float(np.median(arr))
     return out
+
+
+def _slope_from_previous_cycle(met: MeterList, diffLKD, min_pts: int) -> Optional[float]:
+    """Steigung (mm/km) aus dem vorletzten vollstaendigen Zyklus, falls er
+    genug Punkte hat. Nutzt einfachen OLS-Fit (schnell, robust genug fuer
+    einen Fallback). Rueckgabe: slope (negativ) oder None, wenn kein
+    brauchbarer vorletzter Zyklus existiert.
+    """
+    km_all = np.asarray(met.getkm(), dtype=float)
+    lkd_all = np.asarray(met.getvalues(), dtype=float)
+    if km_all.size < min_pts + 1:
+        return None
+    jumps = getPositiveJumpIndices(lkd_all, diffLKD)
+    if len(jumps) >= 2:
+        start, end = jumps[-2], jumps[-1]
+    elif len(jumps) == 1 and jumps[0] >= min_pts:
+        start, end = 0, jumps[0]
+    else:
+        return None
+    if end - start < min_pts:
+        return None
+    km_sub = km_all[start:end]
+    lkd_sub = lkd_all[start:end]
+    if np.ptp(km_sub) <= 0:
+        return None
+    # OLS
+    slope, _intercept = np.polyfit(km_sub, lkd_sub, 1)
+    if not np.isfinite(slope) or slope >= 0:
+        return None
+    return float(slope)
+
+
+def _build_previous_cycle_fallback(
+    met: MeterList,
+    axis_key: str,
+    meter_idx: int,
+    n_km_horizon: int,
+    diffLKD,
+    min_pts: int,
+) -> Optional[_PrognResult]:
+    """Fallback bei zu wenigen Punkten im letzten Zyklus (typisch kurz nach
+    Rad-Tausch): Steigung aus dem vorletzten Zyklus (vorheriges Rad),
+    Prognose aber ab dem AKTUELLEN last_km/last_lkd (= aktuelles Rad).
+
+    Verhindert, dass bei frischem Rad-Tausch die Prognose faelschlicherweise
+    vom alten Rad aus startet und trotzdem korrekt extrapoliert wird.
+    """
+    slope = _slope_from_previous_cycle(met, diffLKD, min_pts)
+    if slope is None:
+        return None
+
+    km = np.asarray(met.getkm(), dtype=float)
+    lkd = np.asarray(met.getvalues(), dtype=float)
+    if km.size < 1 or lkd.size < 1:
+        return None
+    last_km = float(km[-1])
+    last_lkd = float(lkd[-1])
+    km_end = float(last_km + n_km_horizon)
+    n_pts = max(3, int(cfg.progn_new_n_prog_points))
+    km_prog = np.linspace(last_km, km_end, num=n_pts)
+    lkd_prog = last_lkd + slope * (km_prog - last_km)
+
+    gelb_min = float(met.getgelb_min()[-1]) if met.getgelb_min() else None
+    min_val = float(met.getmin()[-1]) if met.getmin() else None
+
+    def _km_threshold(target: Optional[float]) -> Optional[float]:
+        if target is None or slope >= 0:
+            return None
+        dist = (target - last_lkd) / slope
+        if not np.isfinite(dist) or dist <= 0:
+            return None
+        return float(last_km + dist)
+
+    km_warn = _km_threshold(gelb_min)
+    km_limit = _km_threshold(min_val)
+    days_per_km = _calc_days_per_km_from_meter(met)
+
+    nd_raw = met.getnDates()
+    n_len = len(nd_raw) if hasattr(nd_raw, "__len__") else 0
+    last_dn = nd_raw[-1] if n_len > 0 else NAT
+
+    # Reprof-Szenario (Treppe) mit derselben gelernten Reprof-Konfiguration wie
+    # der Hauptpfad — damit das Dashboard auch im Fallback eine Treppe mit
+    # Reprof-Spruengen anzeigen kann.
+    reprof_params = get_reprofiling_params(axis_key)
+    km_warn_reprof = None
+    km_limit_reprof = None
+    km_prog_reprof: list = []
+    lkd_prog_reprof: list = []
+    if (reprof_params is not None
+            and gelb_min is not None and min_val is not None
+            and reprof_params.typical_interval_km > 0
+            and reprof_params.typical_magnitude_mm > 0):
+        km_prog_reprof, lkd_prog_reprof, km_warn_reprof, km_limit_reprof = \
+            _simulate_with_reprofilings(
+                last_km, last_lkd, slope,
+                reprof_params.typical_interval_km,
+                reprof_params.typical_magnitude_mm,
+                gelb_min, min_val,
+                n_km_horizon,
+            )
+
+    # Export-Schwellen: bevorzugt Reprof-Szenario, Fallback lineare Schwelle.
+    km_export_warn = (
+        float(km_warn_reprof) if (km_warn_reprof and km_warn_reprof > 0) else km_warn
+    )
+    km_export_limit = (
+        float(km_limit_reprof) if (km_limit_reprof and km_limit_reprof > 0) else km_limit
+    )
+
+    def _km_to_datenum(km_thresh: Optional[float]):
+        if km_thresh is None or days_per_km <= 0 or is_nat(last_dn):
+            return NAT
+        return add_days(last_dn, (float(km_thresh) - last_km) * days_per_km)
+
+    # Prognose-Kurve (fuer DB-Export und Plot): wenn Reprof-Treppe da, nimm sie;
+    # sonst die lineare Prognose.
+    if len(km_prog_reprof) >= 2 and len(lkd_prog_reprof) == len(km_prog_reprof):
+        km_list = [float(k) for k in km_prog_reprof]
+        lkd_list = [float(y) for y in lkd_prog_reprof]
+        km_arr = np.asarray(km_list, dtype=float)
+        if is_nat(last_dn):
+            date_arr = np.array([], dtype="datetime64[s]")
+        else:
+            date_arr = last_dn + days_to_timedelta64((km_arr - last_km) * days_per_km)
+        met.setkmProg(km_list)
+        met.setvaluesProg(lkd_list)
+        met.setnDatesProg(date_arr if date_arr.size else [])
+    else:
+        if is_nat(last_dn):
+            date_prog = np.array([], dtype="datetime64[s]")
+        else:
+            date_prog = last_dn + days_to_timedelta64((km_prog - last_km) * days_per_km)
+        met.setkmProg(km_prog.tolist())
+        met.setvaluesProg(lkd_prog.tolist())
+        met.setnDatesProg(date_prog if date_prog.size else [])
+
+    met.setgelb_min_Prog_km(km_export_warn if km_export_warn is not None and km_export_warn > 0 else 0.0)
+    met.setmin_Prog_km(km_export_limit if km_export_limit is not None and km_export_limit > 0 else 0.0)
+    met.setgelb_min_Prog_dt(_km_to_datenum(km_export_warn))
+    met.setmin_Prog_dt(_km_to_datenum(km_export_limit))
+
+    logging.info(
+        "Prev-Cycle-Fallback D%d: slope=%.6f | last_km=%.0f last_lkd=%.2f | "
+        "reprof=%s | %s",
+        meter_idx, slope, last_km, last_lkd,
+        bool(km_prog_reprof), axis_key,
+    )
+    return _PrognResult(
+        quality="LOW",
+        model="PREV_CYCLE_FALLBACK",
+        n_points_fit=len(km),
+        n_outliers=0,
+        cycle_source="PREV_CYCLE",
+        slope=slope,
+        slope_low=slope,
+        slope_high=slope,
+        days_per_km=days_per_km,
+        km_warn=km_warn,
+        km_limit=km_limit,
+        km_warn_conservative=km_warn,
+        km_limit_conservative=km_limit,
+        km_warn_reprof=km_warn_reprof,
+        km_limit_reprof=km_limit_reprof,
+        km_prog_reprof=km_prog_reprof,
+        lkd_prog_reprof=lkd_prog_reprof,
+        prog_curve_uses_reprof=bool(km_prog_reprof),
+    )
 
 
 def _build_theil_baureihe_fallback(
@@ -368,11 +538,17 @@ def _plot_linear_ki_and_median(
     """
     KI-Band und Median aus Theil-Sen (slope / slope_low / slope_high) auf linearer km-Achse.
     Dient der Einordnung, wenn die exportierte Prognosekurve das Reprof-Zickzack ist.
+
+    Rechter Rand wird auf ``km_last + nKm`` (Default-Prognosehorizont, typ.
+    300.000 km) beschraenkt. Ohne diese Begrenzung spannt sich das KI-Band
+    bei sehr flachen Trend-Steigungen (z.B. Lagerachsen mit kaum Abrieb)
+    ueber zig Millionen km, der Plot wird unleserlich.
     """
-    if res_m.km_limit is not None and res_m.km_limit > km_last:
+    km_max_horizon = float(km_last + nKm)
+    if res_m.km_limit is not None and km_last < res_m.km_limit < km_max_horizon:
         km_end = float(res_m.km_limit)
     else:
-        km_end = float(km_last + nKm)
+        km_end = km_max_horizon
     npt = max(3, int(cfg.progn_new_n_prog_points))
     km_band = np.linspace(km_last, km_end, num=npt)
     dd = km_band - km_last
@@ -690,6 +866,19 @@ def _plot_axis(
     if cfg.plot_output_dir:
         os.makedirs(cfg.plot_output_dir, exist_ok=True)
         safe = axis_plot_file_slug(tmpVehicle)
+        # Lagerkomponenten teilen die TE/DG/RS-Position mit der aktuell
+        # eingebauten Achse. Ohne RSEINHEITID-Suffix wuerden sich beide
+        # Plots gegenseitig ueberschreiben. Daher an Lagerachsen anhaengen.
+        aus = tmpVehicle.getausbau()
+        is_lager = bool(aus) and str(aus).strip() not in ("", "None")
+        if is_lager:
+            rid = tmpVehicle.getrseinheitid()
+            if rid is not None and str(rid).strip():
+                try:
+                    rid_s = str(int(float(rid)))
+                except (TypeError, ValueError):
+                    rid_s = str(rid).strip()
+                safe = f"{safe}__Lager_{rid_s}"
         plot_path = os.path.join(cfg.plot_output_dir, f"prognose_new_{safe}.png")
         plt.savefig(plot_path, dpi=cfg.plot_dpi)
         logging.info("Diagramm gespeichert: %s", plot_path)
@@ -819,6 +1008,15 @@ def _plot_axis_compare_methods(
     if cfg.plot_output_dir:
         os.makedirs(cfg.plot_output_dir, exist_ok=True)
         safe = axis_plot_file_slug(base_vehicle)
+        aus = base_vehicle.getausbau()
+        if bool(aus) and str(aus).strip() not in ("", "None"):
+            rid = base_vehicle.getrseinheitid()
+            if rid is not None and str(rid).strip():
+                try:
+                    rid_s = str(int(float(rid)))
+                except (TypeError, ValueError):
+                    rid_s = str(rid).strip()
+                safe = f"{safe}__Lager_{rid_s}"
         plot_path = os.path.join(cfg.plot_output_dir, f"prognose_new_{safe}.png")
         plt.savefig(plot_path, dpi=cfg.plot_dpi)
         logging.info("Diagramm gespeichert: %s", plot_path)
@@ -834,6 +1032,7 @@ def _plot_axis_compare_methods(
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Hauptprogramm
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def main() -> None:
     selected_methods = tuple(cfg.prognosis_methods)
@@ -852,19 +1051,35 @@ def main() -> None:
         cur = con.cursor()
         cur.arraysize = cfg.oracle_arraysize
     
+        # res1: eine Zeile pro physischer Achse.
+        # Fuer EINGEBAUTE (ausbau is null) reicht die Position — RSEINHEITID wird NULL geliefert,
+        # damit der Schluessel wie bisher aus (TE, DG, RS) gebildet wird.
+        # Fuer AUSGEBAUTE (Lager) muss die RSEINHEITID in den Schluessel,
+        # weil mehrere Achsen ueber die Zeit dieselbe Position besetzt haben.
         cur.prepare(
-            "select topeinheitbezeichnung, dgeinbaupos, rseinbaupos from bo_radsatzdaten "
-            "where ausbau is null group by topeinheitbezeichnung, dgeinbaupos, rseinbaupos "
-            "order by topeinheitbezeichnung"
+            "select topeinheitbezeichnung, dgeinbaupos, rseinbaupos, "
+            "       case when ausbau is null then null else rseinheitid end as rseinheitid, "
+            "       case when ausbau is null then 0 else 1 end as is_lager "
+            "  from bo_radsatzdaten "
+            " group by topeinheitbezeichnung, dgeinbaupos, rseinbaupos, "
+            "          case when ausbau is null then null else rseinheitid end, "
+            "          case when ausbau is null then 0 else 1 end "
+            " order by topeinheitbezeichnung"
         )
         cur.execute(None, {})
         res1 = cur.fetchall()
-    
+
+        # res2: alle Messungen — fuer eingebaute UND ausgebaute Raeder.
+        # dt_start-Filter nur fuer EINGEBAUTE Zeilen anwenden; Lager-
+        # komponenten haben oft nur wenige, teilweise alte Messungen,
+        # und die relevanten Reprof-Doppelmessungen liegen moeglicher-
+        # weise VOR dem Cutoff. Siehe auch radsatz_csv_io.py.
         cur.prepare(
             "select topeinheitbezeichnung,dgeinbaupos,rseinbaupos,zartbez,datum,stand,Laufleistung,"
             "Min,Max,Gelb_Min,topeinheitid,dgeinheitid,dgbezeichnung,rseinheitid,rsbezeichnung,"
             "einbau,ausbau,aktuell,zaehlerartid from bo_radsatzdaten where zartbez in (:BezZ1,:BezZ2) "
-            "and datum > TO_DATE(:StartDatum,:FormatString) and ausbau is null order by datum"
+            "and (ausbau is not null or datum > TO_DATE(:StartDatum,:FormatString)) "
+            "order by datum"
         )
         cur.execute(
             None,
@@ -882,9 +1097,18 @@ def main() -> None:
         res1, res2 = load_bo_radsatz_from_csv(CSV_BO_RADSATZDATEN, dtStartData)
     
     # ── Fahrzeugachsen-Dictionary aufbauen ─────────────────────────────────────────
+    # res1-Zeile: (TE, DG, RS, RSEINHEITID_oder_None, is_lager) — die letzten
+    # beiden Felder werden fuer den eindeutigen Schluessel von Lagerachsen
+    # gebraucht. Alte 3-Spalten-Rueckgaben (CSV-Fallback) bleiben kompatibel,
+    # weil wir defensiv per Index zugreifen.
     dict_VehicleAxis = {}
     for strVehicle in sorted(res1, key=_vehicle_axis_sort_key):
-        dict_VehicleAxis[make_axis_key(strVehicle)] = VehicleAxis(
+        rseinheitid = strVehicle[3] if len(strVehicle) > 3 else None
+        key = make_axis_key(
+            strVehicle[0], strVehicle[1], strVehicle[2],
+            rseinheitid=rseinheitid,
+        )
+        dict_VehicleAxis[key] = VehicleAxis(
             strVehicle[0], strVehicle[1], strVehicle[2],
             MeterList([], [], [], [], [], [], []),
             MeterList([], [], [], [], [], [], []),
@@ -896,8 +1120,15 @@ def main() -> None:
     else:
         try:
             # ── Messdaten in VehicleAxis-Objekte einsortieren ──────────────────────
+            # Fuer ausgebaute Zeilen (r[16]=AUSBAU gefuellt) gehoert die Messung
+            # zu einer konkreten physischen Achse (r[13]=RSEINHEITID). Der
+            # Schluessel muss die ID enthalten, damit Messdaten verschiedener
+            # Lagerachsen an derselben Position NICHT vermischt werden.
             for r in res2:
-                axis_key = make_axis_key(r)
+                rid_for_key = r[13] if r[16] else None   # None = eingebaut
+                axis_key = make_axis_key(
+                    r[0], r[1], r[2], rseinheitid=rid_for_key
+                )
                 tVehicle = dict_VehicleAxis.get(axis_key)
                 if tVehicle is None:
                     logging.warning(
@@ -1028,6 +1259,22 @@ def main() -> None:
                                 res1_m, res2_m = _calc_prognosis_axis_pair(
                                     wm1, wm2, key + "_LKD1", key + "_LKD2", nKm,
                                 )
+                                # Fallback 1: zu wenig Punkte im letzten
+                                # Zyklus (typ. kurz nach Rad-Tausch) →
+                                # Steigung aus vorletztem Zyklus, Prognose
+                                # startet beim aktuellen last_km/last_lkd.
+                                _min_pts_fit = max(int(cfg.progn_new_min_points_fit or 4), 4)
+                                if not (wm1.getkmProg() and wm2.getkmProg()):
+                                    fb1 = _build_previous_cycle_fallback(
+                                        wm1, key + "_LKD1", 1, nKm, diffLKD, _min_pts_fit,
+                                    )
+                                    fb2 = _build_previous_cycle_fallback(
+                                        wm2, key + "_LKD2", 2, nKm, diffLKD, _min_pts_fit,
+                                    )
+                                    if fb1 is not None and fb2 is not None:
+                                        res1_m = fb1
+                                        res2_m = fb2
+                                # Fallback 2: Baureihen-Mittelwert (optional)
                                 if cfg.progn_new_baureihe_fallback and not (wm1.getkmProg() and wm2.getkmProg()):
                                     fb1 = _build_theil_baureihe_fallback(
                                         wm1,
@@ -1132,7 +1379,22 @@ def main() -> None:
             if useDatabase:
                 con = oracledb.connect(str_connection)
                 cur = con.cursor()
+                # Vor dem Neuschreiben alle vorhandenen LKD-Prognose-Zeilen
+                # loeschen. Der bisherige 14-Tage-Filter griff nicht, wenn
+                # zwei Laeufe am selben Tag ausgefuehrt wurden (z.B. Test-
+                # lauf + Freigabe), beide Ergebnisse blieben parallel in der
+                # Tabelle stehen und das Dashboard mischte beide Treppen.
+                # Da der Lauf alle derzeit geplanten LKD-Prognosen komplett
+                # neu berechnet, ist das Loeschen der kompletten LKD-Zeilen
+                # unbedenklich. Zusaetzlich werden sehr alte Zeilen anderer
+                # Messgroessen aufgeraeumt (klassischer Housekeeping-Filter).
                 date_cutoff = datetime.now() - timedelta(days=nDays2Delete)
+                cur.execute(
+                    "delete from BO_RADSATZDATEN_PROGNOSE "
+                    "where ZARTBEZ in (:z1, :z2)",
+                    {"z1": "Rad-Laufkreisdurchmesser-1",
+                     "z2": "Rad-Laufkreisdurchmesser-2"},
+                )
                 cur.execute(
                     "delete from BO_RADSATZDATEN_PROGNOSE where LETZTEAENDZEIT < :dtLAend",
                     {"dtLAend": date_cutoff},

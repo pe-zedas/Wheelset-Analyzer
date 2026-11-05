@@ -7,7 +7,7 @@ Abfrage bleibt kundenprofilabhaengig (Spaltennamen).
 from __future__ import annotations
 
 import logging
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .models import Flotte
 from .profile import Profile
@@ -102,21 +102,48 @@ def _run_sql(conn, sql: str) -> Tuple[List[str], list]:
 
 
 def _parse_prognose_rows(rows, header, profile, flotte) -> int:
-    """Parst BO_RADSATZDATEN_PROGNOSE-Zeilen und reichert ``flotte``."""
-    from .csv_source import _parse_float, _parse_int, _get
-    from .models import Prognose, Quality
+    """Parst BO_RADSATZDATEN_PROGNOSE-Zeilen und reichert ``flotte``.
+
+    Jede Zeile der Prognose-Tabelle gehoert zu einem Punkt der Treppen-
+    Prognose eines Rades: STAND/DATUM/LAUFLEISTUNG sind die Y/X-Werte.
+    Reprofilierungen erscheinen als zwei Zeilen am selben Datum (zuerst
+    der hoehere "vor"-Wert, dann der niedrigere "nach"-Wert). Zusaetzlich
+    enthaelt jede Zeile dieselben Endpunkt-Spalten KM_/DATUM_WARNWERT und
+    KM_/DATUM_GRENZWERT. Wir sammeln beides pro Rad und heften sie an
+    ``mr.prognose``.
+    """
+    from .csv_source import _parse_float, _parse_int, _get, _dedupe_treppe
+    from .models import Prognose, PrognosePunkt, Quality
     from datetime import datetime as _dt
 
     idx = {profile.columns_prognose[name]: i
            for i, name in enumerate(header) if name in profile.columns_prognose}
 
+    # Lookup fuer EINGEBAUTE Achsen (Match ueber Position topeinheit/dg/rs).
     axis_by_ids = {}
     for e in flotte.einheiten.values():
         for dg in e.drehgestelle.values():
             for a in dg.achsen.values():
                 axis_by_ids[(e.topeinheit_id, dg.dg_id, a.rs_id)] = (e, dg, a)
 
-    best = {}  # (axle_key, side, mg_name) -> (score, Prognose)
+    # Lookup fuer LAGERKOMPONENTEN: pro physischer Achse rs_id -> (Achse im
+    # Lager, dg_komponente_falls_dg).
+    # Backend identifiziert Lagerachsen eindeutig ueber RSEINHEITID.
+    lager_axle_by_rsid = {}   # rs_id -> (LagerKomponente, "achse")
+    lager_dg_axle_by_rsid = {}  # rs_id -> (LagerKomponente, inner_Achse)
+    for comp in flotte.lager:
+        if comp.kind == "achse" and comp.rs_id is not None:
+            lager_axle_by_rsid[comp.rs_id] = comp
+        elif comp.kind == "drehgestell":
+            for inner_axle in comp.achsen.values():
+                if inner_axle.rs_id is not None:
+                    lager_dg_axle_by_rsid[inner_axle.rs_id] = (comp, inner_axle)
+
+    best = {}            # (axle_key, side, mg_name) -> (score, Prognose-Endpunkte)
+    punkte: Dict[tuple, List[PrognosePunkt]] = {}
+    # lager_best / lager_punkte verwenden rs_id als Teil des Keys
+    lager_best = {}      # (rs_id, side, mg_name) -> (score, Prognose-Endpunkte)
+    lager_punkte: Dict[tuple, List[PrognosePunkt]] = {}
     for row in rows:
         row_s = [
             ("" if v is None else
@@ -136,8 +163,19 @@ def _parse_prognose_rows(rows, header, profile, flotte) -> int:
             _parse_int(_get(row_s, idx, "dg_id")),
             _parse_int(_get(row_s, idx, "rs_id")),
         )
-        if axis_by_ids.get(key_axis) is None:
-            continue
+        ausbau_str = _get(row_s, idx, "ausbau")
+        is_lager = bool(ausbau_str and ausbau_str.strip())
+
+        if is_lager:
+            # Lagerpfad: Zuordnung ueber rs_id (physische Achse).
+            rs_id = key_axis[2]
+            if rs_id is None:
+                continue
+            if rs_id not in lager_axle_by_rsid and rs_id not in lager_dg_axle_by_rsid:
+                continue
+        else:
+            if axis_by_ids.get(key_axis) is None:
+                continue
 
         def _dt_or_none(s):
             if not s: return None
@@ -149,6 +187,21 @@ def _parse_prognose_rows(rows, header, profile, flotte) -> int:
                     continue
             return None
 
+        datum = _dt_or_none(_get(row_s, idx, "datum"))
+        stand = _parse_float(_get(row_s, idx, "stand"), profile.decimal)
+        lauf = _parse_float(_get(row_s, idx, "laufleistung"), profile.decimal)
+        if is_lager:
+            key_full = (key_axis[2], side, mdef.name)   # rs_id im Schluessel
+        else:
+            key_full = (key_axis, side, mdef.name)
+
+        if datum is not None and stand is not None:
+            pp = PrognosePunkt(datum=datum, stand=stand, laufleistung=lauf)
+            if is_lager:
+                lager_punkte.setdefault(key_full, []).append(pp)
+            else:
+                punkte.setdefault(key_full, []).append(pp)
+
         prog = Prognose(
             km_warnwert=_parse_float(_get(row_s, idx, "km_warnwert"), profile.decimal),
             datum_warnwert=_dt_or_none(_get(row_s, idx, "datum_warnwert")),
@@ -159,16 +212,16 @@ def _parse_prognose_rows(rows, header, profile, flotte) -> int:
         )
         aktuell = _parse_int(_get(row_s, idx, "aktuell")) or 0
         laend = _dt_or_none(_get(row_s, idx, "letzteaendzeit"))
-        datum = _dt_or_none(_get(row_s, idx, "datum"))
         score = (aktuell,
                  laend.timestamp() if laend else 0,
                  datum.timestamp() if datum else 0)
-        key_full = (key_axis, side, mdef.name)
-        prev = best.get(key_full)
+        store = lager_best if is_lager else best
+        prev = store.get(key_full)
         if prev is None or score > prev[0]:
-            best[key_full] = (score, prog)
+            store[key_full] = (score, prog)
 
     attached = 0
+    # Eingebaute Raeder: Prognose an deren Messreihen anhaengen.
     for (key_axis, side, mg_name), (_s, prog) in best.items():
         _, _, achse = axis_by_ids[key_axis]
         rad = achse.raeder.get(side)
@@ -177,12 +230,34 @@ def _parse_prognose_rows(rows, header, profile, flotte) -> int:
         mr = rad.messreihen.get(mg_name)
         if mr is None:
             continue
+        prog.punkte = _dedupe_treppe(punkte.get((key_axis, side, mg_name), []))
         mr.prognose = prog
         attached += 1
 
-    log.info("Oracle-Prognose: %d Messreihen angereichert (aus %d Zeilen)",
-             attached, len(rows))
-    return attached
+    # Lagerkomponenten: Prognose an deren Messreihen anhaengen.
+    attached_lager = 0
+    for (rs_id, side, mg_name), (_s, prog) in lager_best.items():
+        rad = None
+        if rs_id in lager_axle_by_rsid:
+            comp = lager_axle_by_rsid[rs_id]
+            rad = comp.raeder.get(side)
+        elif rs_id in lager_dg_axle_by_rsid:
+            _comp, inner_axle = lager_dg_axle_by_rsid[rs_id]
+            rad = inner_axle.raeder.get(side)
+        if rad is None:
+            continue
+        mr = rad.messreihen.get(mg_name)
+        if mr is None:
+            continue
+        prog.punkte = _dedupe_treppe(lager_punkte.get((rs_id, side, mg_name), []))
+        mr.prognose = prog
+        attached_lager += 1
+
+    log.info(
+        "Oracle-Prognose: %d eingebaute + %d Lager-Messreihen angereichert (aus %d Zeilen)",
+        attached, attached_lager, len(rows),
+    )
+    return attached + attached_lager
 
 
 def _flotte_raw_sql(profile, limit: Optional[int]) -> str:

@@ -16,9 +16,10 @@ from PySide6.QtWidgets import (
     QPushButton, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
+from ..logic.prognose import faelligkeit_shift
 from ..data.models import (
     Achse, ComponentState, Drehgestell, Einheit, Flotte, LagerKomponente, Rad,
-    Side, StatusAmpel, _worst_messreihe,
+    Side, StatusAmpel, _worst_messreihe, _worst_status,
 )
 from .overview_widgets import DonutPane, GanttPane
 from .plot_widget import PlotPane
@@ -57,12 +58,60 @@ def _iter_messreihen(obj):
                 yield mr
 
 
+def _iter_achse_rad(obj):
+    """Iteriert ``(achse, rad)``-Paare fuer alle physischen Raeder
+    (links/rechts) unter einem Flotte-/Einheit-/DG-/Achse-Objekt.
+
+    Raeder ohne Messreihen sowie das Pseudo-Rad ``unspecified`` (das
+    Achsen-direkte Messreihen wie STICHMASS/SPURMASS traegt) werden
+    uebersprungen. Die Achse wird mit ausgegeben, damit der Donut den
+    Status inkl. achsenweiter Messreihen bilden kann.
+    """
+    if isinstance(obj, Flotte):
+        for e in obj.einheiten.values():
+            yield from _iter_achse_rad(e)
+    elif isinstance(obj, Einheit):
+        for dg in obj.drehgestelle.values():
+            yield from _iter_achse_rad(dg)
+    elif isinstance(obj, Drehgestell):
+        for a in obj.achsen.values():
+            yield from _iter_achse_rad(a)
+    elif isinstance(obj, Achse):
+        for side, r in obj.raeder.items():
+            side_val = getattr(side, "value", side)
+            if side_val == "unspecified":
+                continue
+            if not r.messreihen:
+                continue
+            yield obj, r
+
+
+def _rad_status_incl_axle(achse, rad) -> StatusAmpel:
+    """Rad-Status inkl. Achsen-direkter Messreihen.
+
+    STICHMASS_ABSTAND und SPURMASS_SR werden pro Achse erfasst (nicht
+    pro Rad) und haengen am Pseudo-Rad ``unspecified``. Fuer den Donut
+    muessen sie auf die echten Raeder (links/rechts) propagiert werden
+    — sonst zeigt die Tabelle rote Spur-Punkte, der Donut aber keine
+    roten Räder.
+    """
+    stati = [m.status for m in rad.messreihen.values()]
+    for side, other in achse.raeder.items():
+        side_val = getattr(side, "value", side)
+        if side_val != "unspecified":
+            continue
+        stati.extend(m.status for m in other.messreihen.values())
+    return _worst_status(stati)
+
+
 def _status_counts(obj) -> Dict[StatusAmpel, int]:
-    """Zaehlt Status ueber alle Messreihen (jede Reihe zaehlt separat)."""
+    """Zaehlt Status pro Rad (schlechtester Status aus eigenen und
+    achsenweiten Messreihen)."""
     counts = {StatusAmpel.GREEN: 0, StatusAmpel.YELLOW: 0,
               StatusAmpel.RED: 0, StatusAmpel.GRAY: 0}
-    for mr in _iter_messreihen(obj):
-        counts[mr.status] = counts.get(mr.status, 0) + 1
+    for achse, rad in _iter_achse_rad(obj):
+        st = _rad_status_incl_axle(achse, rad)
+        counts[st] = counts.get(st, 0) + 1
     return counts
 
 
@@ -208,6 +257,15 @@ def _centered(inner: QWidget) -> QWidget:
 def _collect_gantt_entries(groups, flotte, prog_cfg):
     """Sammelt Reprof-/Warn-/Grenz-Termine pro Gruppe (Einheit oder DG).
 
+    Die Werte werden direkt aus ``mr.prognose`` (Prognose-Tabelle)
+    gelesen — keine Live-Berechnung mehr.
+
+    * Warn-/Grenz-Datum stehen als Endpunkte in der Tabelle.
+    * Reprofilierungen werden aus ``prog.punkte`` extrahiert: zwei Punkte
+      am selben Datum, deren zweiter ``stand`` kleiner ist als der erste,
+      markieren eine prognostizierte Reprofilierung an diesem Datum.
+      Nur Reprofs in der Zukunft (nach heute) erscheinen im Gantt.
+
     ``groups`` ist eine Liste ``(label, iterable_of_drehgestelle)``.
     Rueckgabe: Liste von
     ``(label, [(reprof_datum, achse_label), …],
@@ -215,87 +273,74 @@ def _collect_gantt_entries(groups, flotte, prog_cfg):
              [(grenz_datum, achse_label), …],
              note | None)``.
 
-    ``note`` ist ein kurzer Status-Text, der in der Gantt-Zeile angezeigt
-    wird, wenn fuer die Gruppe KEIN Marker erzeugt werden konnte. Die
-    Gruppe erscheint in diesem Fall trotzdem (eigene Zeile), damit der
-    Nutzer sieht, dass die Einheit vorhanden ist, aber nicht
-    prognostizierbar:
-
-    * ``keine historischen Daten vorhanden - Prognose konnte nicht erzeugt werden``
-      → keine LKD-Messreihe oder Historie leer auf allen Raedern.
-    * ``zu wenige historische Daten vorhanden - Prognose konnte nicht erzeugt werden``
-      → Historie vorhanden, aber die Treppen-Prognose liefert nichts
-      Verwertbares (zu wenige Punkte, keine km/Tag-Schaetzung …).
-
-    Zeitlogik: Die Prognose-Treppe rechnet km ab dem letzten Messwert;
-    km-Differenzen werden ueber die km/Tag-Rate in Tag-Differenzen
-    umgerechnet und AB HEUTE aufaddiert.
-
     Pro Achse wird nur das kritischste Rad eingezeichnet (frueheste
-    Grenzueberschreitung; sonst frueheste Warnung). Dessen
-    Reprofilierungen, Warn- und Grenz-Marker werden aufgenommen; das
-    andere Rad derselben Achse wird uebersprungen.
+    Grenzueberschreitung; sonst frueheste Warnung). Dessen Reprofs,
+    Warn- und Grenz-Marker werden aufgenommen.
     """
-    from ..logic.prognose import project_with_reprofs, crossings
-    from .plot_widget import _estimate_km_per_day
     heute = datetime.now()
     out = []
     _side = {"left": "links", "right": "rechts", "unspecified": "–"}
-    NOTE_NO_HISTORY = (
-        "keine historischen Daten vorhanden - "
-        "Prognose konnte nicht erzeugt werden"
-    )
-    NOTE_TOO_FEW = (
-        "zu wenige historische Daten vorhanden - "
-        "Prognose konnte nicht erzeugt werden"
-    )
+    NOTE_NO_PROGNOSE = "keine Prognosedaten vorhanden"
+
+    def _future_reprofs(prog, mr) -> List[datetime]:
+        """Zukuenftige Reprof-Datumswerte aus prog.punkte extrahieren.
+
+        Die Prognose-Treppe ist im Backend an den letzten Messwert geankert
+        (damit sie im Diagramm nahtlos an die Historie anknuepft). Fuer die
+        Faelligkeits-Kachel muessen die Reprof-Termine aber ab heute gelten
+        — eine Lagerachse verschleisst nicht, die Restlebensdauer zaehlt ab
+        Wiederinbetriebnahme. Wir verschieben die Reprof-Datumswerte um
+        delta = heute − letzter Messwert (nur fuer ruhende Raeder).
+        """
+        pts = list(getattr(prog, "punkte", []) or [])
+        letzt = mr.letzter_wert() if mr is not None else None
+        delta = timedelta(0)
+        if letzt is not None and letzt.datum < heute:
+            delta = heute - letzt.datum
+        out_d: List[datetime] = []
+        for a, b in zip(pts, pts[1:]):
+            # Zwei Punkte am selben Datum und der zweite springt nach
+            # unten → prognostizierte Reprofilierung.
+            if a.datum == b.datum and b.stand < a.stand:
+                shifted = b.datum + delta
+                if shifted > heute:
+                    out_d.append(shifted)
+        return out_d
+
     for label, dgs in groups:
         reprofs: List[Tuple[datetime, str]] = []
         warns: List[Tuple[datetime, str]] = []
         grenze: List[Tuple[datetime, str]] = []
-        has_any_history = False     # irgendein LKD-Datum vorhanden?
-        has_any_prognose = False    # irgendeine Treppen-Prognose erzeugt?
+        has_any_history = False
+        has_any_prognose = False
         for dg in dgs:
             for achse in dg.achsen.values():
-                # Pro Rad die Treppen-Prognose + Marker vorab berechnen.
-                rad_marker = []   # (rad_reprofs, warn_d, grenz_d, axis_label)
+                rad_marker = []   # (reprofs, warn_d, grenz_d, axis_label)
                 for seite, rad in achse.raeder.items():
                     mr = rad.messreihen.get("LKD")
                     if mr is None or not mr.historie:
                         continue
                     has_any_history = True
-                    letzt = mr.letzter_wert()
-                    if letzt is None or letzt.laufleistung is None:
+                    prog = mr.prognose
+                    if prog is None:
                         continue
-                    km_per_day = _estimate_km_per_day(mr)
-                    if not km_per_day or km_per_day <= 0:
-                        continue
-                    treppen = project_with_reprofs(
-                        mr, prog_cfg, flotte=flotte, achse=achse)
-                    if not treppen:
+                    # Verschiebung in die Zukunft: NUR fuer Faelligkeits-
+                    # Anzeigen (Kachel, KpiCards, Info-Box, Export).
+                    # Logik in logic.prognose.faelligkeit_shift.
+                    warn_d = faelligkeit_shift(prog.datum_warnwert, mr)
+                    grenz_d = faelligkeit_shift(prog.datum_grenzwert, mr)
+                    rad_reprofs = _future_reprofs(prog, mr)
+                    if (warn_d is None and grenz_d is None and not rad_reprofs):
                         continue
                     has_any_prognose = True
                     axis_label = (
                         f"{dg.dg_einbaupos} · {achse.rs_einbaupos} · "
                         f"Rad {_side.get(seite.value, seite.value)}"
                     )
-                    def _km_to_date(km_val: float, _ref=letzt, _rate=km_per_day):
-                        return heute + timedelta(
-                            days=(km_val - _ref.laufleistung) / _rate)
-                    rad_reprofs: List[Tuple[datetime, str]] = []
-                    for (x1, y1), (x2, y2) in zip(treppen, treppen[1:]):
-                        if x1 == x2 and y2 < y1:
-                            rad_reprofs.append((_km_to_date(x1), axis_label))
-                    warn_d = grenz_d = None
-                    if letzt.gelb_min is not None:
-                        cx = crossings(treppen, letzt.gelb_min)
-                        if cx:
-                            warn_d = _km_to_date(cx[0][0])
-                    if letzt.min_val is not None:
-                        cx = crossings(treppen, letzt.min_val)
-                        if cx:
-                            grenz_d = _km_to_date(cx[0][0])
-                    rad_marker.append((rad_reprofs, warn_d, grenz_d, axis_label))
+                    rad_marker.append(
+                        ([(d, axis_label) for d in rad_reprofs],
+                         warn_d, grenz_d, axis_label)
+                    )
                 if not rad_marker:
                     continue
                 with_grenz = [r for r in rad_marker if r[2] is not None]
@@ -308,6 +353,7 @@ def _collect_gantt_entries(groups, flotte, prog_cfg):
                     else:
                         crit = rad_marker[0]
                 rad_reprofs, warn_d, grenz_d, axis_label = crit
+                # Reprofs auf den Zeitraum bis zur Grenzueberschreitung begrenzen
                 if grenz_d is not None:
                     rad_reprofs = [r for r in rad_reprofs if r[0] <= grenz_d]
                 reprofs.extend(rad_reprofs)
@@ -318,17 +364,14 @@ def _collect_gantt_entries(groups, flotte, prog_cfg):
         reprofs.sort(key=lambda t: t[0])
         warns.sort(key=lambda t: t[0])
         grenze.sort(key=lambda t: t[0])
-        if reprofs or warns or grenze:
+        # Note nur anzeigen, wenn fuer diese Gruppe wirklich KEINE
+        # Prognose-Daten in der Tabelle stehen. Bei vorhandener Prognose,
+        # aber ohne Marker im Sichtfenster (alle Fälligkeiten liegen vor
+        # heute oder weit in der Zukunft), bleibt die Zeile leer.
+        if (reprofs or warns or grenze) or has_any_prognose:
             note = None
-        elif not has_any_history:
-            note = NOTE_NO_HISTORY
-        elif not has_any_prognose:
-            note = NOTE_TOO_FEW
         else:
-            # Prognose vorhanden, aber keine Faelligkeit im Horizont —
-            # fachlich auch "kein Treffer"; wir zeigen hier dennoch die
-            # Zeile, aber ohne Note (bleibt leer).
-            note = None
+            note = NOTE_NO_PROGNOSE
         out.append((label, reprofs, warns, grenze, note))
     return out
 
@@ -397,6 +440,7 @@ class BaseView(QWidget):
         filter_row.addWidget(QLabel("Filter:"))
         self._filter_edit = QLineEdit()
         self._filter_edit.setPlaceholderText("Freitext …")
+        self._filter_edit.setClearButtonEnabled(True)   # X-Button rechts im Feld
         self._filter_edit.textChanged.connect(self._apply_filter)
         filter_row.addWidget(self._filter_edit, 1)
         self._filter_hint = QLabel("")
@@ -474,9 +518,9 @@ class FlotteView(BaseView):
             donut_panel.setProperty("class", "Panel")
             dp = QVBoxLayout(donut_panel)
             dp.setContentsMargins(12, 10, 12, 10)
-            dp_title = QLabel("Status Verteilung · alle Räder")
-            dp_title.setProperty("class", "PanelTitle")
-            dp.addWidget(dp_title)
+            self._dp_title = QLabel("Status Verteilung · alle Räder")
+            self._dp_title.setProperty("class", "PanelTitle")
+            dp.addWidget(self._dp_title)
             self._donut = DonutPane()
             dp.addWidget(self._donut)
             # Gantt-Panel
@@ -500,7 +544,7 @@ class FlotteView(BaseView):
         n_e = len(self._einheiten)
 
         # Donut
-        self._donut.canvas.set_counts(_status_counts(flotte), center_label="Messreihen")
+        self._donut.canvas.set_counts(_status_counts(flotte), center_label="Räder")
 
         # Gantt wird spaeter aus der Tabellenreihenfolge gebaut (nach dem
         # Fuellen der Zeilen). Damit folgt die Kachel auch Sortierungen,
@@ -517,7 +561,10 @@ class FlotteView(BaseView):
             self._sort_hooked = True
 
         # Panel
-        self._panel_title.setText(f"Einheiten · Status je Messgröße ({n_e})")
+        self._panel_title.setText(
+            f"Einheiten: Anzahl {n_e} - Status (anhand schlechtesten, "
+            f"letzten Messwert)"
+        )
         headers = ["", "Einheit", "Drehgestelle", "Achsen"] + \
                   [MGROESSEN_LABEL[k] for k in MGROESSEN_SPALTEN]
         self._table.setSortingEnabled(False)
@@ -599,12 +646,14 @@ class FlotteView(BaseView):
         row = self._selected_row()
         e = self._einheit_from_row(row)
         if e:
-            self._donut.canvas.set_counts(_status_counts(e), center_label=e.topeinheit_bez)
+            self._donut.canvas.set_counts(_status_counts(e), center_label="Räder")
+            self._dp_title.setText(f"Status Verteilung · Räder · {e.topeinheit_bez}")
         else:
             if self._einheiten:
                 self._donut.canvas.set_counts(
                     {s: sum(_status_counts(e).get(s, 0) for e in self._einheiten)
-                     for s in StatusAmpel}, center_label="Messreihen")
+                     for s in StatusAmpel}, center_label="Räder")
+                self._dp_title.setText("Status Verteilung · alle Räder")
 
 
 # -----------------------------------------------------------
@@ -632,8 +681,9 @@ class EinheitView(BaseView):
             self._overview_row.setSpacing(10)
             dp_panel = QFrame(); dp_panel.setProperty("class", "Panel")
             dpl = QVBoxLayout(dp_panel); dpl.setContentsMargins(12, 10, 12, 10)
-            dp_t = QLabel("Status Verteilung"); dp_t.setProperty("class", "PanelTitle")
-            dpl.addWidget(dp_t)
+            self._dp_title = QLabel("Status Verteilung · Räder")
+            self._dp_title.setProperty("class", "PanelTitle")
+            dpl.addWidget(self._dp_title)
             self._donut = DonutPane(); dpl.addWidget(self._donut)
             gp_panel = QFrame(); gp_panel.setProperty("class", "Panel")
             gpl = QVBoxLayout(gp_panel); gpl.setContentsMargins(12, 10, 12, 10)
@@ -650,7 +700,8 @@ class EinheitView(BaseView):
         self._dgs = sorted(einheit.drehgestelle.values(), key=lambda d: d.dg_einbaupos)
         self._ensure_overview()
 
-        self._donut.canvas.set_counts(_status_counts(einheit), center_label="Messreihen")
+        self._donut.canvas.set_counts(_status_counts(einheit), center_label="Räder")
+        self._dp_title.setText(f"Status Verteilung · Räder · {einheit.topeinheit_bez}")
         self._gp_title.setText(f"Prognose Fälligkeiten LKD : Einheit {einheit.topeinheit_bez}")
         if not getattr(self, "_sort_hooked", False):
             self._table.model().layoutChanged.connect(
@@ -761,8 +812,9 @@ class DrehgestellView(BaseView):
             self._overview_row.setSpacing(10)
             dp_panel = QFrame(); dp_panel.setProperty("class", "Panel")
             dpl = QVBoxLayout(dp_panel); dpl.setContentsMargins(12, 10, 12, 10)
-            dp_t = QLabel("Status Verteilung"); dp_t.setProperty("class", "PanelTitle")
-            dpl.addWidget(dp_t)
+            self._dp_title = QLabel("Status Verteilung · Räder")
+            self._dp_title.setProperty("class", "PanelTitle")
+            dpl.addWidget(self._dp_title)
             self._donut = DonutPane(); dpl.addWidget(self._donut)
             gp_panel = QFrame(); gp_panel.setProperty("class", "Panel")
             gpl = QVBoxLayout(gp_panel); gpl.setContentsMargins(12, 10, 12, 10)
@@ -780,7 +832,9 @@ class DrehgestellView(BaseView):
         self._achsen = sorted(dg.achsen.values(), key=lambda a: a.rs_einbaupos)
         self._ensure_overview()
 
-        self._donut.canvas.set_counts(_status_counts(dg), center_label="Messreihen")
+        self._donut.canvas.set_counts(_status_counts(dg), center_label="Räder")
+        self._dp_title.setText(
+            f"Status Verteilung · Räder · {einheit.topeinheit_bez} · {dg.dg_einbaupos}")
         self._gp_title.setText(
             f"Prognose Fälligkeiten LKD : {einheit.topeinheit_bez} · {dg.dg_einbaupos}")
         if not getattr(self, "_sort_hooked", False):
@@ -874,7 +928,11 @@ class DrehgestellView(BaseView):
         row = self._selected_row()
         a = self._achse_from_row(row)
         if a:
-            self._donut.canvas.set_counts(_status_counts(a), center_label=a.rs_einbaupos)
+            self._donut.canvas.set_counts(_status_counts(a), center_label="Räder")
+            self._dp_title.setText(
+                f"Status Verteilung · Räder · "
+                f"{self._einheit.topeinheit_bez} · {self._dg.dg_einbaupos} · {a.rs_einbaupos}"
+            )
 
 
 # -----------------------------------------------------------
@@ -1085,38 +1143,13 @@ class AchseView(QWidget):
                 if sub_txt and sub_txt != "–":
                     card.setSubValue(sub_txt)
                 widgets.append(card)
-            dg = prog.datum_grenzwert if prog else None
-            dw = prog.datum_warnwert if prog else None
+            # Werte stammen aus der Prognose-Tabelle (mr.prognose).
+            # Datumswerte werden fuer die Anzeige ab heute verschoben
+            # (siehe faelligkeit_shift); km-Werte bleiben unveraendert.
+            dg = faelligkeit_shift(prog.datum_grenzwert, mr) if prog else None
+            dw = faelligkeit_shift(prog.datum_warnwert, mr) if prog else None
             kg = prog.km_grenzwert if prog else None
             kw = prog.km_warnwert if prog else None
-            # Fallback: Schnittpunkt der eigenen Treppen-Prognose — der
-            # Algorithmus ist nur fuer LKD gueltig, deshalb hier konditional.
-            if (mr.messgroesse == "LKD" and (kg is None or kw is None)
-                    and self._prognose_config):
-                try:
-                    from ..logic.prognose import project_with_reprofs, crossings
-                    from ..ui.plot_widget import _estimate_km_per_day
-                    treppen = project_with_reprofs(
-                        mr, self._prognose_config,
-                        flotte=self._flotte, achse=self._achse)
-                    if treppen and letzt:
-                        kmd = _estimate_km_per_day(mr)
-                        if letzt.min_val is not None and kg is None:
-                            cx = crossings(treppen, letzt.min_val)
-                            if cx:
-                                kg = cx[0][0]
-                                if dg is None and kmd and kmd > 0 and letzt.laufleistung is not None:
-                                    from datetime import timedelta as _td
-                                    dg = letzt.datum + _td(days=(kg - letzt.laufleistung) / kmd)
-                        if letzt.gelb_min is not None and kw is None:
-                            cx = crossings(treppen, letzt.gelb_min)
-                            if cx:
-                                kw = cx[0][0]
-                                if dw is None and kmd and kmd > 0 and letzt.laufleistung is not None:
-                                    from datetime import timedelta as _td
-                                    dw = letzt.datum + _td(days=(kw - letzt.laufleistung) / kmd)
-                except Exception:
-                    pass
             _add_prog_card("Grenz", "danger", dg, kg)
             _add_prog_card("Warn", "warn", dw, kw)
             return widgets
@@ -1165,19 +1198,33 @@ class AchseView(QWidget):
             self._kennzahlen_row.addWidget(w)
 
         # Prognose-Status-Kachel ganz rechts. Zwei Varianten:
-        # - Prognose vorhanden: Reprofilierungs-Intervall + Abtrag je Rad.
+        # - Prognose vorhanden: Warn-/Grenz-Datum + km-Stand je Rad
+        #   (Werte stammen direkt aus der Prognose-Tabelle).
         # - Keine Prognose: Hinweistext.
         has_prognose = bool(getattr(current.canvas, "_prognose_available", False))
         info = getattr(current.canvas, "_prognose_info", []) or []
         if has_prognose and info:
             self._kennzahlen_row.addStretch(1)
             lines = []
-            for label, interval_km, magnitude_mm in info:
-                tkm = f"{interval_km/1000:,.0f}".replace(",", " ")
-                mg = f"{magnitude_mm:.2f}".replace(".", ",")
-                lines.append(
-                    f"{label}: Reprofilierungsintervall {tkm} Tkm · Abtrag {mg} mm"
-                )
+            # info ist Liste von (label, prog). Fuer die Datumsverschiebung
+            # ab heute brauchen wir zusaetzlich die Messreihe des Rades.
+            # self._mr_by_label (gesetzt in refresh_kennzahlen) liefert das.
+            mr_by_label = getattr(self, "_mr_by_label", {}) or {}
+            for label, prog in info:
+                parts = []
+                mr_here = mr_by_label.get(label)
+                dw = faelligkeit_shift(prog.datum_warnwert, mr_here) if mr_here is not None else prog.datum_warnwert
+                dg = faelligkeit_shift(prog.datum_grenzwert, mr_here) if mr_here is not None else prog.datum_grenzwert
+                if dw is not None:
+                    km = (f" ({prog.km_warnwert/1000:,.0f} Tkm)".replace(",", " ")
+                          if prog.km_warnwert is not None else "")
+                    parts.append(f"Warn {dw:%d.%m.%Y}{km}")
+                if dg is not None:
+                    km = (f" ({prog.km_grenzwert/1000:,.0f} Tkm)".replace(",", " ")
+                          if prog.km_grenzwert is not None else "")
+                    parts.append(f"Grenz {dg:%d.%m.%Y}{km}")
+                if parts:
+                    lines.append(f"{label}: " + " · ".join(parts))
             box = QLabel("\n".join(lines))
             box.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             box.setStyleSheet(
@@ -1221,12 +1268,12 @@ class LagerView(BaseView):
         if not hasattr(self, "_overview_row"):
             self._overview_row = QHBoxLayout()
             self._overview_row.setSpacing(10)
-            # Donut: Status aller Messreihen in allen Lager-Komponenten
+            # Donut: Status pro Rad in den aktuell sichtbaren Lager-Komponenten
             dp_panel = QFrame(); dp_panel.setProperty("class", "Panel")
             dpl = QVBoxLayout(dp_panel); dpl.setContentsMargins(12, 10, 12, 10)
-            dp_t = QLabel("Status Verteilung · alle Lager-Messreihen")
-            dp_t.setProperty("class", "PanelTitle")
-            dpl.addWidget(dp_t)
+            self._dp_title = QLabel("Status Verteilung · alle Lager-Räder")
+            self._dp_title.setProperty("class", "PanelTitle")
+            dpl.addWidget(self._dp_title)
             self._donut = DonutPane(); dpl.addWidget(self._donut)
             # Gantt: Fälligkeiten je Lagerkomponente
             gp_panel = QFrame(); gp_panel.setProperty("class", "Panel")
@@ -1266,19 +1313,41 @@ class LagerView(BaseView):
                 lambda *_: self._rebuild_gantt_from_table())
             self._sort_hooked = True
 
-        # Donut 1: Status-Verteilung über alle Messreihen aller Lager-Komponenten
+        # Donut: Status-Verteilung — ein Status pro Rad (schlechteste
+        # Messreihe des Rades + ggf. Achsen-direkte STICHMASS/SPURMASS).
+        # Nur die aktuell sichtbaren Lagerkomponenten (Filter beachten).
         status_counts = {s: 0 for s in StatusAmpel}
-        for c in flotte.lager:
-            for mr in c.messreihen.values():
-                status_counts[mr.status] = status_counts.get(mr.status, 0) + 1
-            for rad in c.raeder.values():
-                for mr in rad.messreihen.values():
-                    status_counts[mr.status] = status_counts.get(mr.status, 0) + 1
-            for a in c.achsen.values():
-                for rad in a.raeder.values():
-                    for mr in rad.messreihen.values():
-                        status_counts[mr.status] = status_counts.get(mr.status, 0) + 1
-        self._donut.canvas.set_counts(status_counts, center_label="Messreihen")
+
+        def _unspec_axle_stati(axle) -> List[StatusAmpel]:
+            out = []
+            for side, other in axle.raeder.items():
+                side_val = getattr(side, "value", side)
+                if side_val != "unspecified":
+                    continue
+                out.extend(m.status for m in other.messreihen.values())
+            return out
+
+        def _count_axle(axle):
+            axle_extra = _unspec_axle_stati(axle)
+            for side, rad in axle.raeder.items():
+                side_val = getattr(side, "value", side)
+                if side_val == "unspecified":
+                    continue
+                if not rad.messreihen and not axle_extra:
+                    continue
+                stati = [m.status for m in rad.messreihen.values()] + axle_extra
+                st = _worst_status(stati)
+                status_counts[st] = status_counts.get(st, 0) + 1
+
+        for c in items:
+            if c.kind == "achse":
+                # Lagerachse selbst ist die Achse → raeder haengen direkt.
+                _count_axle(c)
+            else:
+                # Drehgestell im Lager: ueber seine Achsen zaehlen.
+                for a in c.achsen.values():
+                    _count_axle(a)
+        self._donut.canvas.set_counts(status_counts, center_label="Räder")
 
         self._clear_kpis()
 
@@ -1288,8 +1357,12 @@ class LagerView(BaseView):
             suffix = " · einsatzbereit"
         elif filter_state == ComponentState.STORED_TO_OVERHAUL:
             suffix = " · zu überholen"
-        self._panel_title.setText(f"{title}{suffix} ({len(items)})")
+        self._panel_title.setText(
+            f"{title}{suffix}: Anzahl {len(items)} - Status "
+            f"(anhand schlechtesten, letzten Messwert)"
+        )
         self._gp_title.setText(f"Prognose Fälligkeiten LKD : Lager{suffix}")
+        self._dp_title.setText(f"Status Verteilung · Lager-Räder{suffix}")
 
         headers = ["", "Typ", "Bezeichnung", "letzte Einheit", "Ausbau", "Zustand"] + \
                   [MGROESSEN_LABEL[k] for k in MGROESSEN_SPALTEN]

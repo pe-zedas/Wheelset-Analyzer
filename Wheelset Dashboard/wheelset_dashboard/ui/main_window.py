@@ -195,6 +195,8 @@ class MainWindow(QMainWindow):
             "(farblich entsprechend des Zustands).")
         self._values_cb.toggled.connect(self._toggle_show_values)
         self.statusBar().addPermanentWidget(self._values_cb)
+        # Prognose-Neuberechnung ist jetzt im Einstellungsdialog
+        # (Extras → Einstellungen → Prognose · Neuberechnung).
         self._reload_btn = QPushButton("Neu laden")
         self._reload_btn.setIconSize(QSize(16, 16))
         self._reload_btn.setIcon(QIcon(qta.icon("mdi.refresh", color="#4A4E57").pixmap(16, 16)))
@@ -311,6 +313,55 @@ class MainWindow(QMainWindow):
             self._timer.stop()
         else:
             self._timer.start(int(value) * 60 * 1000)
+
+    # ------------------- backend-prognose ----------------
+    def recalc_prognose(self):
+        """Startet das Backend-Skript (Wheelset Analyzer_new_approach),
+        das die Prognose neu rechnet und in die Prognose-Tabelle schreibt.
+        Laeuft synchron (blockiert die UI) mit Wait-Cursor; nach Erfolg
+        werden die Daten neu geladen.
+        """
+        from ..logic.backend_runner import run_backend_prognose
+        reply = QMessageBox.question(
+            self, "Prognose neu berechnen",
+            "Das Backend-Skript 'Wheelset Analyzer_new_approach' wird "
+            "jetzt gestartet. Es rechnet die Prognose neu und schreibt "
+            "sie in die Prognose-Tabelle. Je nach Datenmenge dauert "
+            "das einige Minuten — das Dashboard reagiert in dieser "
+            "Zeit nicht.\n\nFortfahren?",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        use_db = (self._repo.config.source == "oracle")
+        self._status_lbl.setText("Prognose wird neu berechnet …")
+        self._reload_btn.setEnabled(False)
+        from PySide6.QtGui import QCursor
+        from PySide6.QtWidgets import QApplication
+        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+        try:
+            result = run_backend_prognose(use_database=use_db)
+        finally:
+            QApplication.restoreOverrideCursor()
+            self._reload_btn.setEnabled(True)
+        if result.ok:
+            self._status_lbl.setText("Prognose neu berechnet · lade Daten …")
+            QMessageBox.information(
+                self, "Prognose neu berechnet",
+                f"{result.message}\n\n"
+                f"Logdatei: {result.log_path or '(nicht gefunden)'}",
+            )
+            self.reload_data()
+        else:
+            self._status_lbl.setText("Prognose-Neuberechnung fehlgeschlagen")
+            tail = (result.stderr or result.stdout or "")[-2000:]
+            QMessageBox.critical(
+                self, "Prognose-Neuberechnung fehlgeschlagen",
+                f"{result.message}\n\n"
+                f"Logdatei: {result.log_path or '(nicht gefunden)'}\n\n"
+                f"Letzte Ausgabezeilen:\n{tail}",
+            )
 
     # ------------------- navigation ----------------------
 
@@ -574,3 +625,7 @@ class MainWindow(QMainWindow):
             self._repo = Repository(new_repo_cfg)
             self.set_refresh_minutes(new["refresh_min"])
             self.reload_data()
+            # Wenn im Dialog "Prognose jetzt neu berechnen" geklickt wurde,
+            # startet nach dem Uebernehmen der Einstellungen das Backend.
+            if getattr(dlg, "recalc_requested", False):
+                self.recalc_prognose()

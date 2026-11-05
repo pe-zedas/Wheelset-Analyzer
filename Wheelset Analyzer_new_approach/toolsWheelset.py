@@ -37,7 +37,21 @@ def getStartIndexLastCycle(p,q,diffLKD):
         indTmp=nA[0][i-1]+1
     else:
         indTmp=0
-    return indTmp       
+    return indTmp
+
+
+def getPositiveJumpIndices(q, diffLKD):
+    """Alle Indizes ``i``, an denen ``q[i+1] - q[i] > diffLKD`` — also
+    positive LKD-Spruenge (Rad-Tausch). Rueckgabe: Liste der Start-
+    Indizes NACH dem jeweiligen Sprung (also der erste Punkt des neuen
+    Zyklus). Leere Liste wenn keine Spruenge vorhanden sind.
+    """
+    qnew = np.asarray(q)
+    if qnew.size < 2:
+        return []
+    dy = qnew[1:] - qnew[:-1]
+    idx = np.where(dy > diffLKD)[0]
+    return [int(i + 1) for i in idx]
   
 
 

@@ -26,6 +26,10 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("Einstellungen")
         self.resize(820, 520)
         self._config = dict(config)
+        # Vom Hauptfenster abgefragt: wurde im Dialog die Neuberechnung
+        # angefordert? Dann startet das Hauptfenster nach dem Uebernehmen
+        # der Einstellungen das Backend-Skript.
+        self.recalc_requested: bool = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
@@ -82,6 +86,7 @@ class SettingsDialog(QDialog):
         self._build_page_prognose_lkd_reprof(config)
         self._build_page_prognose_lkd_standard(config)
         self._build_page_prognose_lkd_darstellung(config)
+        self._build_page_prognose_recalc(config)
 
         # ---- Baum befuellen ---------------------------------------
         g_allgemein = QTreeWidgetItem(["Allgemein"])
@@ -108,6 +113,8 @@ class SettingsDialog(QDialog):
         g_lkd.addChild(it_reprof)
         g_lkd.addChild(it_standard)
         g_lkd.addChild(it_dar)
+        it_recalc = QTreeWidgetItem(["Neuberechnung"])
+        g_prognose.addChild(it_recalc)
 
         # Pfade → page-index
         self._item_to_page = {
@@ -123,6 +130,8 @@ class SettingsDialog(QDialog):
                               self._pages["prognose_standard"]),
             id(it_dar): ("Prognose · LKD · Darstellung",
                          self._pages["prognose_darstellung"]),
+            id(it_recalc): ("Prognose · Neuberechnung",
+                            self._pages["prognose_recalc"]),
         }
         self._tree.currentItemChanged.connect(self._on_tree_select)
         self._tree.setCurrentItem(g_allgemein)
@@ -282,6 +291,31 @@ class SettingsDialog(QDialog):
         # direkt im Baum anklickt — die Darstellungs-Seite dient als
         # sinnvollster Default).
         self._pages["prognose_overview"] = self._pages["prognose_darstellung"]
+
+    def _build_page_prognose_recalc(self, config: dict):
+        form = self._new_page(
+            "prognose_recalc",
+            "Startet das Backend-Skript 'Wheelset Analyzer_new_approach' und "
+            "schreibt die neu berechnete Prognose in die Prognose-Tabelle. "
+            "Je nach Datenmenge dauert das einige Minuten — das Dashboard "
+            "reagiert in dieser Zeit nicht. Die Neuberechnung startet erst "
+            "nach OK (die aktuellen Einstellungen werden vorher uebernommen)."
+        )
+        btn_row = QHBoxLayout()
+        self._recalc_btn_dlg = QPushButton("Prognose jetzt neu berechnen")
+        self._recalc_btn_dlg.setToolTip(
+            "Backend-Skript starten. Nach OK wird der Dialog geschlossen und "
+            "die Neuberechnung ausgefuehrt.")
+        self._recalc_btn_dlg.clicked.connect(self._on_recalc_clicked)
+        btn_row.addWidget(self._recalc_btn_dlg)
+        btn_row.addStretch(1)
+        form.addRow("Backend-Lauf", _wrap_hbox(btn_row))
+
+    def _on_recalc_clicked(self):
+        """Markiert, dass das Hauptfenster nach dem Schliessen des Dialogs
+        die Neuberechnung starten soll, und akzeptiert den Dialog."""
+        self.recalc_requested = True
+        self.accept()
 
     # ------------------------------------------------------------------
 

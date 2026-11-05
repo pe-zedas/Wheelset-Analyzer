@@ -74,14 +74,20 @@ def load_bo_radsatz_from_csv(csv_path: str, dt_start_str: str):
     if not zeilen:
         return [], []
 
+    # Eingebaute und ausgebaute (Lager-)Achsen beide durchlassen.
+    # res1 bekommt 5 Felder: (TE, DG, RS, RSEINHEITID_oder_None, is_lager).
+    # Fuer eingebaute Raeder bleibt der Schluessel (TE, DG, RS) wie bisher;
+    # fuer Lagerachsen sichert die RSEINHEITID die Eindeutigkeit.
     res1_keys, res1 = set(), []
     for d in zeilen:
-        if not _ausbau_leer(d):
-            continue
+        is_lager = not _ausbau_leer(d)
+        rid = (d.get("RSEINHEITID", "") or "").strip() if is_lager else None
         key = (
             d["TOPEINHEITBEZEICHNUNG"].strip(),
             d["DGEINBAUPOS"].strip(),
             d["RSEINBAUPOS"].strip(),
+            rid,
+            1 if is_lager else 0,
         )
         if key not in res1_keys:
             res1_keys.add(key)
@@ -89,13 +95,18 @@ def load_bo_radsatz_from_csv(csv_path: str, dt_start_str: str):
 
     res2 = []
     for d in zeilen:
-        if not _ausbau_leer(d):
-            continue
         zb = (d.get("ZARTBEZ") or "").strip()
         if zb not in (bez_z1, bez_z2):
             continue
         dt_mess = _parse_csv_datetime(d.get("DATUM"))
-        if dt_mess is None or dt_mess <= dt_start:
+        if dt_mess is None:
+            continue
+        # dt_start-Filter nur fuer EINGEBAUTE Zeilen (schuetzt die Prognose
+        # vor uralten Archivdaten). Lagerkomponenten haben oft nur wenige
+        # Messungen; die wichtigen Reprof-Doppelmessungen koennen VOR dem
+        # Cutoff liegen. Die alte Live-App im Dashboard hat ebenfalls alle
+        # verfuegbaren Lager-Messungen verwendet.
+        if _ausbau_leer(d) and dt_mess <= dt_start:
             continue
         res2.append(_csv_row_to_res2_tuple(d))
 
