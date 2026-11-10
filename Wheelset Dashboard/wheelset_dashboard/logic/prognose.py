@@ -1,6 +1,14 @@
 """Prognose- und Reprofilierungs-Logik, nachgebaut aus dem Backend
 ``Radsatz_Bahn_DB_new_Approach.py`` / ``prognosis_new_core.py`` / ``reprof_learning.py``.
 
+STAND (Entscheidung 2026-11-10): Dieser Code rechnet die Prognose direkt in der App.
+Er wird **aktuell nicht genutzt** — die Anzeige liest die Prognose aus der Tabelle
+``BO_RADSATZDATEN_PROGNOSE`` (``Messreihe.prognose``). Er bleibt bewusst **erhalten**
+(z.B. fuer eine eigene Prognose bei Kunden, deren Schema das Backend nicht rechnet) und
+soll nicht als toter Code geloescht werden. Genutzt wird nur ``faelligkeit_shift``.
+Alle uebrigen Funktionen sind ohne Aufrufer und ungetestet; bei einer Reaktivierung
+gegen das Backend (``prognosis_new_core.py``) abgleichen.
+
 Wichtige Konventionen:
 - Reprofilierung = **negativer** LKD-Sprung (vom Rad wird Material abgetragen).
 - Positive LKD-Spruenge = Rad-Tausch, werden explizit ausgeschlossen.

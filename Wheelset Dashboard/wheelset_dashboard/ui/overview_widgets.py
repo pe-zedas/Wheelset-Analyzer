@@ -40,6 +40,7 @@ class DonutCanvas(FigureCanvasQTAgg):
         ax.clear()
         ax.set_aspect("equal")
         if total == 0:
+            ax.set_axis_off()
             ax.text(0.5, 0.5, "keine Daten", ha="center", va="center",
                     transform=ax.transAxes, color="#8A8F99", fontsize=11)
             self.draw_idle()

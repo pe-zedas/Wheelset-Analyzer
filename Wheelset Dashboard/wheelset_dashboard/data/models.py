@@ -156,6 +156,8 @@ class LagerKomponente:
     messreihen: Dict[str, Messreihe] = field(default_factory=dict)
     # Nur bei kind == "drehgestell": eingebaute Achsen
     achsen: Dict[str, "Achse"] = field(default_factory=dict)
+    # Nur bei kind == "drehgestell": DGEINHEITID (zum Abgleich mit eingebauten DG)
+    dg_id: Optional[int] = None
 
     def status(self) -> StatusAmpel:
         stati = [m.status for m in self.messreihen.values()]

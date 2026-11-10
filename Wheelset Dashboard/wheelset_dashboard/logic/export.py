@@ -192,6 +192,14 @@ def export_raw_csv(flotte: Flotte, profile: Profile, out_path: Path) -> int:
                     for mp in mr.historie:
                         w.writerow(_build_lager_row(csv_cols, profile, comp, mg, mp))
                         n += 1
+            # Lager-Drehgestell: die Messwerte haengen an seinen Achsen
+            for a in comp.achsen.values():
+                for seite, rad in a.raeder.items():
+                    for mg, mr in rad.messreihen.items():
+                        for mp in mr.historie:
+                            w.writerow(_build_lager_row(csv_cols, profile, comp, mg, mp,
+                                                        achse=a, seite=seite))
+                            n += 1
 
     log.info("Rohdaten-CSV exportiert: %s (%d Zeilen)", out_path, n)
     return n
@@ -235,12 +243,18 @@ def _build_raw_row(csv_cols, profile, e, dg, a, seite, mg_name, mp, aktuell):
     return [_fmt(data.get(profile.columns_raw[c]), profile) for c in csv_cols]
 
 
-def _build_lager_row(csv_cols, profile, comp, mg_name, mp):
-    zartbez_text = _choose_zartbez(profile, mg_name, None)
+def _build_lager_row(csv_cols, profile, comp, mg_name, mp, achse=None, seite=None):
+    """Zeile fuer eine Lager-Komponente. Bei einem Lager-Drehgestell werden
+    ``achse``/``seite`` mitgegeben (Drehgestell- und Achsangaben wie bei
+    eingebauten Zeilen)."""
+    zartbez_text = _choose_zartbez(profile, mg_name, seite)
     data = {
         "topeinheit_bez": comp.letzte_einheit,
-        "rs_id": comp.rs_id,
-        "rs_bez": comp.rs_bez,
+        "dg_id": comp.dg_id,
+        "dg_bez": comp.dg_bez,
+        "rs_id": achse.rs_id if achse else comp.rs_id,
+        "rs_bez": achse.rs_bez if achse else comp.rs_bez,
+        "rs_einbaupos": achse.rs_einbaupos if achse else "",
         "ausbau": comp.ausbau,
         "einbau": comp.einbau,
         "aktuell": 0,

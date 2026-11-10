@@ -65,6 +65,7 @@ Im **Lager** ist der Drill-Down zweistufig: Doppelklick auf ein **Drehgestell** 
 ### 4.3 Tabellen-Interaktion
 
 - **Zeilenauswahl** (einfacher Klick) in Flotte-/Einheit-/DG-Tabelle: Donut-Chart und Gantt-Zeitachse unterhalb aktualisieren sich sofort und zeigen die Verteilung bzw. Fälligkeiten der ausgewählten Entität statt der Gesamtaggregation.
+- **Diagramm-Symbol (letzte Spalte)**: Ein kleines Diagramm-Symbol ganz rechts zeigt, dass es für diese Zeile Messdaten gibt. Es erscheint, sobald die Zeile selbst oder eine darunterliegende Komponente Messdaten hat (Einheit → Drehgestell → Achse). Ohne Messdaten bleibt die Zelle leer. Gilt in der Flotten-, Einheiten-, Drehgestell- und Lager-Tabelle; die Spalte lässt sich sortieren.
 - **Spaltensortierung**: Klick auf einen Spaltenkopf. Für die Status-Spalten (LKD, Sd, Sh, qR, Hohll., Überw., Breite) wird nach Ampelstufe sortiert (grau < grün < gelb < rot).
 - **Freitextfilter** oberhalb jeder Tabelle: filtert zeilenweise über alle Textspalten; rechts wird `n/total` eingeblendet.
 
@@ -145,10 +146,31 @@ Die drei mitgelieferten Profile unterscheiden sich in:
 | | VGF | Abellio | MOB |
 |---|---|---|---|
 | Spalten | 21 (Legacy) | 23 (neu) | 23 (neu) |
-| Warnband | `GELB_MIN/MAX` | `MIN_BEREICH/MAX_BEREICH` | `MIN_BEREICH/MAX_BEREICH` |
-| Letzte Änderung | `LETZTEAENDZEIT` | `LASTUPDATE` | `LASTUPDATE` |
-| Mess-Vokabular | Deutsch, nur LKD1/LKD2 | Deutsch, breit | **Französisch** |
-| Hierarchie | bis Radsatz | gemischt | nur bis Drehgestell |
+| Schwellen | `MIN/MAX` + Warnband `GELB_MIN/MAX` | `MIN`/`MAX` und Toleranzbereich `MIN_BEREICH/MAX_BEREICH` (gilt als Grenzwert, kein Gelb) | keine (Spalten leer) |
+| Letzte Änderung | `LETZTEAENDZEIT` | `LASTUPDATE` (Rohdaten), `LETZTEAENDZEIT` (Prognose-Tabelle) | `LASTUPDATE` (Rohdaten), `LETZTEAENDZEIT` (Prognose-Tabelle) |
+| Mess-Vokabular | Deutsch, nur LKD1/LKD2 | Deutsch, Seite in vier Schreibweisen (`links`, `[Radscheibe Laufradsatz (L)]`, …) | **Französisch**, ohne Seitenangabe (`Diamètre de roue`, `Epaisseur du boudin`, …) |
+| Hierarchie | bis Radsatz | gemischt: mit DG+Radsatz, nur DG, nur Einheit | nur Drehgestell, Räder als „Messposition 1–4“ |
+| Nullwerte | – | `STAND = 0` = Platzhalter, wird verworfen | Durchmesser 0 wird verworfen; `Creux` (Hohllauf) ist durchgehend 0 und gültig |
+| Prognose | Backend-Lauf | nicht berechnet (LKD ohne Grenzwerte) | nicht möglich (weder Laufleistung noch Grenzwerte) |
+
+**MOB — was zu beachten ist:**
+
+- **Umfang:** derzeit nur 104 Zeilen (Aug. 2024 – Jan. 2025), 3 Einheiten, 2 Drehgestelle; sieben Messgrößen (Durchmesser, Spurkranzdicke/-höhe, Flankenmaß qR, Hohllauf, Überwalzung, Radbreite).
+- **Keine Radsatz-Ebene:** Die Daten kennen nur das Drehgestell. Die Einheiten-Übersicht zeigt deshalb `1` Drehgestell und `0` Achsen.
+- **Vier Räder, ein Zähler → Messposition 1–4:** Je Drehgestell und Termin liefert die Messanlage vier Werte je Messgröße nacheinander im Abstand von etwa einer Minute, ohne Seiten- oder Achsangabe. Das Dashboard ordnet den k-ten Wert eines Termins der **Messposition k** zu. Jede Messposition ist eine eigene Zeitreihe mit Linie und eigener Ampel; die Drehgestell-Ansicht heißt dann „Messpositionen“, der Donut zählt vier Räder.
+- **Messposition ≠ Radnummer:** Die Nummer folgt der Messreihenfolge. Welches Rad am Fahrzeug dahintersteckt (Achse 1 links/rechts …), steht nicht in den Daten. Die Zuordnung ist nur richtig, wenn die Anlage jedes Mal in derselben Reihenfolge misst. Über mehrere Termine ist das nicht prüfbar, solange keine Radnummer vorliegt.
+- **Unvollständige Termine:** Hat ein Termin nicht genau vier Werte einer Messgröße, wird nichts geraten: Die Werte bleiben in der Sammel-Achse `(Radsatz-Zuordnung fehlt)` (nur Punkte, keine Linie).
+- **Ampel grau:** Es gibt keine Grenzwerte und keine Laufleistung. Eine Prognose ist damit nicht möglich.
+- **Drehgestell wechselt die Einheit:** `Bogie EV 1 / 137.21.0026_A` war in Einheit 271 ausgebaut und ist seit 22.08.2024 in Einheit 273 eingebaut. Es erscheint nur in Einheit 273 (zuletzt benutzter Platz); die Messwerte vom August 2024 aus Einheit 271 sind dadurch nicht mehr sichtbar (siehe Hinweis zur Lager-Liste unten). Das Lager ist bei MOB damit leer.
+- **Prognose neu berechnen** ist nur für VGF freigegeben.
+
+**Abellio — was zu beachten ist:**
+
+- **Anzeige:** historische Messwerte von Durchmesser, Spurkranzdicke/-höhe, Flankenmaß qR, Hohllauf, Überwalzung, Radbreite, Spurmaß und Radinnenabstand. Bremsscheiben, Rund-/Planlaufabweichung und Durchmesserdifferenz werden nicht angezeigt.
+- **LKD-Ampel grau:** In der Datenbank hat der Durchmesser weder `MIN` noch `MAX` noch `MIN_BEREICH`; ohne Grenzwert gibt es keine Ampel. Die Verläufe sind trotzdem sichtbar.
+- **Einheiten ohne Radsatz-Zuordnung:** Bei etwa der Hälfte der Einheiten stehen die Messwerte nur auf Einheitenebene. Sie erscheinen unter `(ohne Drehgestell)` › `(Radsatz-Zuordnung fehlt)`. An einem Zähler hängen dort mehrere Achsen (bis zu 9 Werte je Tag); sie lassen sich ohne Achs-ID nicht trennen, das Diagramm zeigt daher mehrere Punkte je Tag.
+- **Prognose neu berechnen** ist nur für VGF freigegeben (das Backend rechnet das VGF-Schema).
+- **Zugangsdaten:** `config/oracle_connect_string.txt` enthält eine Zeile je Kunde (`vgf = user/passwort@dsn`, `abellio = …`, `mob = …`). Der Einstellungsdialog füllt Nutzer, DSN und Passwort beim Profilwechsel.
 
 Neue Profile können im Ordner `wheelset_dashboard/config/profiles/` als YAML angelegt werden (siehe Technische Doku).
 
@@ -156,4 +178,5 @@ Neue Profile können im Ordner `wheelset_dashboard/config/profiles/` als YAML an
 
 - Oracle-Loader ist angebunden, aber in dieser Build ohne Live-DB getestet. **End-to-End-Test gegen Produktions-DB steht aus.**
 - Für Abellio/MOB sind die Prognosedaten derzeit lückenhaft (vgl. ZAR-3219) — Dashboard zeigt die Historie, markiert Räder ohne Prognose als ⚪.
+- Die Lager-Liste zeigt nur Komponenten, deren **zuletzt benutzter Platz das Lager** ist. Ein Drehgestell oder Radsatz mit eingebauten Zeilen (Ausbau leer, `AKTUELL = 1`) gilt als eingebaut und steht nicht im Lager (ausgeblendet: VGF 8 von 55, Abellio 95 von 162, MOB 1 von 1). Die **Messhistorie des früheren Einbaus** wird dabei nicht an die eingebaute Reihe angehängt, sie ist dann nirgends mehr sichtbar. Der Grund: Laufleistung und Prognose gelten je Einbau.
 - Lager-"überholt"/"zu überholen"-Erkennung basiert auf LKD-Sprung ≥ 2 mm nach letztem Ausbau — Schwelle in `wheelset_dashboard/logic/lager_state.py` anpassbar.

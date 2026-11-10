@@ -11,6 +11,8 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from matplotlib.ticker import FuncFormatter
 
+from ..data.csv_source import NO_RS_LABEL
+
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 
@@ -135,6 +137,12 @@ class PlotCanvas(FigureCanvasQTAgg):
         self.clear()
         ax = self._ax
 
+        # Sammel-Achse ("Radsatz-Zuordnung fehlt"): Werte mehrerer Raeder
+        # stehen unter einem Zaehler. Eine Linie dazwischen wuerde einen Trend
+        # vortaeuschen -> nur Punkte zeichnen.
+        pooled = achse is not None and getattr(achse, "rs_einbaupos", None) == NO_RS_LABEL
+
+        plotted = False          # wurde mindestens eine Reihe gezeichnet?
         all_min = []
         all_max = []
         all_gelb_min = []
@@ -158,7 +166,9 @@ class PlotCanvas(FigureCanvasQTAgg):
             col = SIDE_COLORS.get(side, COL_UNSPEC)
             # Linie + Punkte in einem Zug (gemeinsamer Legend-Eintrag)
             ax.plot(xs, ys, color=col, linewidth=1.2, marker="o", markersize=4,
+                    linestyle="none" if pooled else "-",
                     zorder=3, label=SIDE_LABEL.get(side, side))
+            plotted = True
             # Schwellen sammeln
             for mp in mr.historie:
                 if mp.min_val is not None: all_min.append(mp.min_val)
@@ -382,11 +392,17 @@ class PlotCanvas(FigureCanvasQTAgg):
             ax.set_ylim(min(ymin_cur, min(drawn_values) - pad),
                         max(ymax_cur, max(drawn_values) + pad))
 
-        # Heute-Linie
+        # Heute-Linie — nur, wenn sie den Verlauf nicht zusammenstaucht.
+        # Bei historischen Daten (z.B. Abellio: Messungen enden Jahre vor
+        # heute) wuerde axvline() die Achse bis heute aufziehen und den
+        # eigentlichen Verlauf in eine Ecke druecken. Der Datenbereich
+        # (Historie + Prognose) ist hier bereits skaliert.
         if today is not None and x_mode == "datum":
-            ax.axvline(today, color=COL_TODAY, linestyle="--", linewidth=0.8, alpha=0.8)
-            ax.text(today, ax.get_ylim()[1], "  heute",
-                    color=COL_TODAY, fontsize=8, va="top")
+            x_lo, x_hi = ax.get_xlim()
+            if mdates.date2num(today) <= x_hi + 0.5 * (x_hi - x_lo):
+                ax.axvline(today, color=COL_TODAY, linestyle="--", linewidth=0.8, alpha=0.8)
+                ax.text(today, ax.get_ylim()[1], "  heute",
+                        color=COL_TODAY, fontsize=8, va="top")
 
         # (Vertikale Warn-/Grenz-Linien entfernt — die Schnittpunkte werden
         # jetzt direkt als Marker auf der Prognosekurve angezeigt.)
@@ -401,7 +417,17 @@ class PlotCanvas(FigureCanvasQTAgg):
         # Achsenformat
         if x_mode == "datum":
             ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-            ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+            # Bei kurzen Zeitraeumen (z.B. alle Messwerte eines Tages) waere
+            # "%Y-%m" an jeder Marke gleich -> feiner beschriften.
+            x_lo, x_hi = ax.get_xlim()
+            span_days = x_hi - x_lo
+            if span_days < 3:
+                fmt = "%d.%m.%Y %H:%M"
+            elif span_days < 150:
+                fmt = "%d.%m.%Y"
+            else:
+                fmt = "%Y-%m"
+            ax.xaxis.set_major_formatter(mdates.DateFormatter(fmt))
             ax.set_xlabel("Datum")
         else:
             # Grosse Werte in "Tkm" (Tausend Kilometer) statt 1.4e6
@@ -410,8 +436,14 @@ class PlotCanvas(FigureCanvasQTAgg):
             ax.xaxis.set_major_formatter(FuncFormatter(_km_formatter))
             ax.set_xlabel("Laufleistung")
         ax.set_ylabel(y_label)
-        if reihen:
+        if plotted:
             ax.legend(loc="upper right", fontsize=8, frameon=False)
+        else:
+            hint = ("Keine Laufleistung in den Daten"
+                    if x_mode == "km" and any(mr.historie for _, mr, _ in reihen)
+                    else "Keine Messwerte für diese Auswahl")
+            ax.text(0.5, 0.5, hint, ha="center", va="center", transform=ax.transAxes,
+                    color="#8A8F99", fontsize=11)
         self.draw_idle()
 
 

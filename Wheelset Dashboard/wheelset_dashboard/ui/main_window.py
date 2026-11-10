@@ -2,24 +2,27 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 import qtawesome as qta
-from PySide6.QtCore import Qt, QSize, QTimer
+from PySide6.QtCore import Qt, QSize, QTimer, Slot
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMenu,
-    QMenuBar, QMessageBox, QPushButton, QStackedWidget, QStatusBar, QVBoxLayout,
-    QWidget,
+    QApplication, QCheckBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QMainWindow,
+    QMenu, QMenuBar, QMessageBox, QProgressBar, QPushButton, QStackedWidget,
+    QStatusBar, QVBoxLayout, QWidget,
 )
 
+from ..config.app_paths import build_connect_string
 from ..data.models import ComponentState, Flotte, PrognoseConfig
 from ..data.repository import Repository, RepositoryConfig
 from ..logic.export import export_raw_csv, werkstattliste_to_xlsx
 from ..logic.lager_state import recompute_all as recompute_lager
 from ..logic.status import recompute_all as recompute_status
+from .jobs import BackgroundJob
 from .settings_dialog import SettingsDialog
 from . import views as _views
 from .views import AchseView, DrehgestellView, EinheitView, FlotteView, LagerView
@@ -118,13 +121,22 @@ class Breadcrumb(QWidget):
 # -----------------------------------------------------------
 
 class MainWindow(QMainWindow):
-    def __init__(self, repo: Repository, parent=None):
+    def __init__(self, repo: Repository, parent=None, async_load: bool = True):
+        """``async_load=False`` wartet nach jedem Laden/Backend-Lauf auf das
+        Ende (Tests, Skripte). Die Anwendung selbst laedt im Hintergrund."""
         import time as _time
         _ti0 = _time.monotonic()
         super().__init__(parent)
         self._repo = repo
         self._flotte: Optional[Flotte] = None
+        self._flotte_repo: Optional[Repository] = None   # Quelle der angezeigten Daten
         self._prog_cfg = PrognoseConfig()
+        self._async_load = async_load
+        self._load_job: Optional[BackgroundJob] = None
+        self._backend_job: Optional[BackgroundJob] = None
+        self._reload_pending = False
+        self._first_data_logged = False
+        self._current_path: List[Tuple[str, str]] = []
         self.setWindowTitle("Wheelset Analyzer Dashboard")
         self.resize(1200, 740)
         self._ti0 = _ti0
@@ -161,6 +173,15 @@ class MainWindow(QMainWindow):
         self._breadcrumb = Breadcrumb()
         self._breadcrumb.set_owner(self)
         header.addWidget(self._breadcrumb, 1)
+
+        # Aktives Kundenschema (Profil) sichtbar machen.
+        self._schema_lbl = QLabel("")
+        self._schema_lbl.setStyleSheet(
+            "QLabel { color: #185FA5; background: #E8F0FD; border: 1px solid #C9DDF7; "
+            "border-radius: 10px; padding: 2px 12px; font-size: 11px; font-weight: 600; }"
+        )
+        header.addWidget(self._schema_lbl, 0, Qt.AlignVCenter)
+        header.addSpacing(12)
 
         logo_path = Path(__file__).parent / "assets" / "zedas_asset.svg"
         _tl0 = _time.monotonic()
@@ -211,6 +232,13 @@ class MainWindow(QMainWindow):
         self.setStatusBar(QStatusBar())
         self._status_lbl = QLabel("")
         self.statusBar().addWidget(self._status_lbl)
+        # Laufanzeige fuer Laden / Backend-Lauf (unbestimmter Fortschritt)
+        self._busy_bar = QProgressBar()
+        self._busy_bar.setRange(0, 0)
+        self._busy_bar.setTextVisible(False)
+        self._busy_bar.setFixedSize(110, 10)
+        self._busy_bar.hide()
+        self.statusBar().addWidget(self._busy_bar)
         # Checkbox fuer Messwert-Anzeige (links von Neu laden)
         self._values_cb = QCheckBox("Messwerte anzeigen")
         self._values_cb.setToolTip(
@@ -250,9 +278,10 @@ class MainWindow(QMainWindow):
 
         # Auto-Refresh Timer (default off hier; wird nach Einstellungen gesetzt)
         self._timer = QTimer(self)
-        self._timer.timeout.connect(self.reload_data)
+        self._timer.timeout.connect(self._auto_reload)
 
-        # erste Ladung
+        # erste Ladung (im Hintergrund: das Fenster erscheint sofort)
+        self._update_schema_label()
         self.reload_data()
         self.navigate([])
 
@@ -308,13 +337,14 @@ class MainWindow(QMainWindow):
     def _export_rohdaten_csv(self):
         if self._flotte is None:
             return
-        default = f"bo_radsatzdaten_export_{self._repo.profile.name}.csv"
+        shown = self._flotte_repo or self._repo     # Profil der angezeigten Daten
+        default = f"bo_radsatzdaten_export_{shown.profile.name}.csv"
         p, _ = QFileDialog.getSaveFileName(self, "Rohdaten als CSV speichern",
                                             default, "CSV (*.csv)")
         if not p:
             return
         try:
-            n = export_raw_csv(self._flotte, self._repo.profile, Path(p))
+            n = export_raw_csv(self._flotte, shown.profile, Path(p))
             self.statusBar().showMessage(f"CSV gespeichert: {n} Zeilen → {p}", 7000)
         except Exception as exc:
             log.exception("CSV-Export fehlgeschlagen")
@@ -322,30 +352,122 @@ class MainWindow(QMainWindow):
 
     # ------------------- data ----------------------------
 
+    def _update_schema_label(self):
+        """Zeigt Kundenschema (Profil) im Kopf und im Fenstertitel."""
+        prof = self._repo.profile
+        name = prof.name.upper() if len(prof.name) <= 3 else prof.name.capitalize()
+        self._schema_lbl.setText(f"Schema: {name}")
+        self._schema_lbl.setToolTip(prof.description or prof.name)
+        self.setWindowTitle(f"Wheelset Analyzer Dashboard — {name}")
+
+    # ------------------- laden (im Hintergrund) ----------
+
     def reload_data(self):
-        import time as _time
-        _t0 = _time.monotonic()
-        try:
-            flotte = self._repo.load()
-            _t1 = _time.monotonic()
+        """Laedt die Daten im Hintergrund; die Oberflaeche bleibt bedienbar.
+
+        Laeuft bereits ein Laden oder der Backend-Lauf, wird danach genau
+        einmal neu geladen (z.B. nach einem Profilwechsel).
+        """
+        if self._load_job is not None or self._backend_job is not None:
+            self._reload_pending = True
+            return
+        self._start_load()
+
+    def _auto_reload(self):
+        """Timer-Aufruf: laufende Aktionen nicht durch weitere Laeufe stapeln."""
+        if self._load_job is None and self._backend_job is None:
+            self._start_load()
+
+    def _set_busy(self, text: str):
+        self._status_lbl.setText(text)
+        self._busy_bar.show()
+        self._reload_btn.setEnabled(False)
+
+    def _clear_busy(self):
+        self._busy_bar.hide()
+        self._reload_btn.setEnabled(True)
+
+    def is_busy(self) -> bool:
+        return self._load_job is not None or self._backend_job is not None
+
+    def wait_for_load(self, timeout_s: float = 120.0) -> bool:
+        """Wartet (bei laufender Ereignisschleife) bis Laden und Backend-Lauf
+        fertig sind. ``False`` bei Zeitueberschreitung. Fuer Tests/Skripte."""
+        deadline = time.monotonic() + timeout_s
+        app = QApplication.instance()
+        while self.is_busy() or self._reload_pending:
+            if time.monotonic() > deadline:
+                return False
+            app.processEvents()
+            time.sleep(0.005)
+        return True
+
+    def _start_load(self):
+        repo = self._repo
+
+        def work():
+            t0 = time.monotonic()
+            flotte = repo.load()
+            t1 = time.monotonic()
             recompute_status(flotte)
-            _t2 = _time.monotonic()
+            t2 = time.monotonic()
             recompute_lager(flotte)
-            _t3 = _time.monotonic()
-            log.debug(
-                "reload_data timing: repo.load=%.2fs, status=%.2fs, lager=%.2fs",
-                _t1 - _t0, _t2 - _t1, _t3 - _t2,
-            )
-            self._flotte = flotte
-            self._status_lbl.setText(
-                f"Stand {datetime.now().strftime('%H:%M:%S')}  ·  Profil: {self._repo.profile.name}  "
-                f"·  {len(flotte.einheiten)} Einheiten, {len(flotte.lager)} Lager-Komp."
-            )
-            # aktuelle Ansicht neu zeichnen
-            self.navigate(getattr(self, "_current_path", []))
-        except Exception as exc:
-            log.exception("Fehler beim Laden")
-            QMessageBox.critical(self, "Fehler beim Laden", str(exc))
+            t3 = time.monotonic()
+            log.debug("reload_data timing: repo.load=%.2fs, status=%.2fs, lager=%.2fs",
+                      t1 - t0, t2 - t1, t3 - t2)
+            return repo, flotte
+
+        self._set_busy(f"Lade Daten …  (Profil: {repo.profile.name})")
+        job = BackgroundJob(work, name="laden", parent=self)
+        job.done.connect(self._on_load_done)
+        job.failed.connect(self._on_load_failed)
+        self._load_job = job
+        job.start()
+        if not self._async_load:
+            self.wait_for_load()
+
+    @Slot(object)
+    def _on_load_done(self, result):
+        self._load_job = None
+        repo, flotte = result
+        if repo is not self._repo:
+            # Profil/Quelle wurde waehrend des Ladens gewechselt -> verwerfen
+            log.info("Ladeergebnis (%s) verworfen: Einstellungen wurden inzwischen geaendert",
+                     repo.profile.name)
+            self._reload_pending = True
+        else:
+            try:
+                self._flotte = flotte
+                self._flotte_repo = repo
+                self._update_schema_label()
+                self._status_lbl.setText(
+                    f"Stand {datetime.now().strftime('%H:%M:%S')}  ·  Profil: {repo.profile.name}  "
+                    f"·  {len(flotte.einheiten)} Einheiten, {len(flotte.lager)} Lager-Komp."
+                )
+                self.navigate(self._current_path)
+                if not self._first_data_logged:
+                    self._first_data_logged = True
+                    log.debug("Start-Timing: erste Daten sichtbar nach %.2fs (seit MainWindow-Start)",
+                              time.monotonic() - self._ti0)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("Fehler beim Anzeigen der geladenen Daten")
+                QMessageBox.critical(self, "Fehler beim Laden", str(exc))
+        self._clear_busy()
+        self._run_pending()
+
+    @Slot(str)
+    def _on_load_failed(self, message: str):
+        self._load_job = None
+        self._clear_busy()
+        self._status_lbl.setText("Laden fehlgeschlagen")
+        QMessageBox.critical(self, "Fehler beim Laden", message)
+        self._run_pending()
+
+    def _run_pending(self):
+        """Nach Ende einer Aktion: aufgelaufenen Neu-Lade-Wunsch ausfuehren."""
+        if self._reload_pending and not self.is_busy():
+            self._reload_pending = False
+            self._start_load()
 
     def set_refresh_minutes(self, value: str):
         if value == "off":
@@ -361,29 +483,46 @@ class MainWindow(QMainWindow):
         werden die Daten neu geladen.
         """
         from ..logic.backend_runner import run_backend_prognose
+        if self._repo.profile.name != "vgf":
+            # Das Backend liest immer die VGF-Datenbank (eigener Connect-String,
+            # VGF-Spaltennamen) und wuerde hier die falsche Prognose rechnen.
+            QMessageBox.information(
+                self, "Prognose neu berechnen",
+                f"Die Prognose-Neuberechnung ist derzeit nur für das Profil "
+                f"'vgf' verfügbar. Das Backend ist auf das VGF-Schema "
+                f"ausgelegt; für '{self._repo.profile.name}' würde es die "
+                f"falschen Daten rechnen.",
+            )
+            return
         reply = QMessageBox.question(
             self, "Prognose neu berechnen",
             "Das Backend-Skript 'Wheelset Analyzer_new_approach' wird "
             "jetzt gestartet. Es rechnet die Prognose neu und schreibt "
             "sie in die Prognose-Tabelle. Je nach Datenmenge dauert "
-            "das einige Minuten — das Dashboard reagiert in dieser "
-            "Zeit nicht.\n\nFortfahren?",
+            "das einige Minuten. Das Dashboard bleibt währenddessen "
+            "bedienbar; danach werden die Daten neu geladen.\n\nFortfahren?",
             QMessageBox.Yes | QMessageBox.Cancel,
             QMessageBox.Yes,
         )
         if reply != QMessageBox.Yes:
             return
+        if self._backend_job is not None:
+            return
         use_db = (self._repo.config.source == "oracle")
-        self._status_lbl.setText("Prognose wird neu berechnet …")
-        self._reload_btn.setEnabled(False)
-        from PySide6.QtGui import QCursor
-        from PySide6.QtWidgets import QApplication
-        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
-        try:
-            result = run_backend_prognose(use_database=use_db)
-        finally:
-            QApplication.restoreOverrideCursor()
-            self._reload_btn.setEnabled(True)
+        self._set_busy("Prognose wird neu berechnet …")
+        job = BackgroundJob(lambda: run_backend_prognose(use_database=use_db),
+                            name="backend-prognose", parent=self)
+        job.done.connect(self._on_backend_done)
+        job.failed.connect(self._on_backend_failed)
+        self._backend_job = job
+        job.start()
+        if not self._async_load:
+            self.wait_for_load()
+
+    @Slot(object)
+    def _on_backend_done(self, result):
+        self._backend_job = None
+        self._clear_busy()
         if result.ok:
             self._status_lbl.setText("Prognose neu berechnet · lade Daten …")
             QMessageBox.information(
@@ -391,6 +530,7 @@ class MainWindow(QMainWindow):
                 f"{result.message}\n\n"
                 f"Logdatei: {result.log_path or '(nicht gefunden)'}",
             )
+            self._reload_pending = False
             self.reload_data()
         else:
             self._status_lbl.setText("Prognose-Neuberechnung fehlgeschlagen")
@@ -401,6 +541,15 @@ class MainWindow(QMainWindow):
                 f"Logdatei: {result.log_path or '(nicht gefunden)'}\n\n"
                 f"Letzte Ausgabezeilen:\n{tail}",
             )
+            self._run_pending()
+
+    @Slot(str)
+    def _on_backend_failed(self, message: str):
+        self._backend_job = None
+        self._clear_busy()
+        self._status_lbl.setText("Prognose-Neuberechnung fehlgeschlagen")
+        QMessageBox.critical(self, "Prognose-Neuberechnung fehlgeschlagen", message)
+        self._run_pending()
 
     # ------------------- navigation ----------------------
 
@@ -660,6 +809,8 @@ class MainWindow(QMainWindow):
                 oracle_dsn=new["oracle_dsn"] or None,
                 oracle_user=new["oracle_user"] or None,
                 oracle_password=new["oracle_password"] or None,
+                oracle_connect_string=build_connect_string(
+                    new["oracle_user"], new["oracle_password"], new["oracle_dsn"]),
             )
             self._repo = Repository(new_repo_cfg)
             self.set_refresh_minutes(new["refresh_min"])

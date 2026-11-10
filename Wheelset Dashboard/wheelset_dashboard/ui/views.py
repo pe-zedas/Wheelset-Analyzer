@@ -6,24 +6,28 @@ Signalisiert via `drilldown(path)` einen Drill-Down-Wunsch an das Hauptfenster.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
-    QButtonGroup, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-    QPushButton, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
+    QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+    QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from ..logic.prognose import faelligkeit_shift
+from ..logic.aggregation import (
+    collect_gantt_entries, collect_messgroessen_values, has_messdaten, n_messpositionen,
+    n_real_achsen, n_real_dg, status_counts,
+)
 from ..data.models import (
-    Achse, ComponentState, Drehgestell, Einheit, Flotte, LagerKomponente, Rad,
-    Side, StatusAmpel, _worst_messreihe, _worst_status,
+    Achse, ComponentState, Drehgestell, Einheit, Flotte, LagerKomponente, Side,
+    StatusAmpel,
 )
 from .overview_widgets import DonutPane, GanttPane
 from .plot_widget import PlotPane
-from .widgets import AmpelDot, KpiCard, StatusPill, AMPEL_LABEL
+from .widgets import AmpelDot, KpiCard
 
 
 # Reihenfolge der Messgroessen-Spalten (festgelegt, grau wenn nicht vorhanden)
@@ -37,147 +41,6 @@ MGROESSEN_LABEL = {
     "SPURKRANZFLANKE_QR": "qR", "HOHLLAUF": "Hohll.", "UEBERWALZUNG": "Überw.",
     "RADBREITE": "Breite", "SPURMASS_SR": "Spur", "STICHMASS_ABSTAND": "Abst.",
 }
-
-
-def _iter_messreihen(obj):
-    """Iteriert alle Messreihen unter einem Flotte-/Einheit-/DG-/Achse-Objekt."""
-    if isinstance(obj, Flotte):
-        for e in obj.einheiten.values():
-            yield from _iter_messreihen(e)
-    elif isinstance(obj, Einheit):
-        for dg in obj.drehgestelle.values():
-            yield from _iter_messreihen(dg)
-    elif isinstance(obj, Drehgestell):
-        for a in obj.achsen.values():
-            yield from _iter_messreihen(a)
-        for mr in obj.direkt_messreihen.values():
-            yield mr
-    elif isinstance(obj, Achse):
-        for r in obj.raeder.values():
-            for mr in r.messreihen.values():
-                yield mr
-
-
-def _iter_achse_rad(obj):
-    """Iteriert ``(achse, rad)``-Paare fuer alle physischen Raeder
-    (links/rechts) unter einem Flotte-/Einheit-/DG-/Achse-Objekt.
-
-    Raeder ohne Messreihen sowie das Pseudo-Rad ``unspecified`` (das
-    Achsen-direkte Messreihen wie STICHMASS/SPURMASS traegt) werden
-    uebersprungen. Die Achse wird mit ausgegeben, damit der Donut den
-    Status inkl. achsenweiter Messreihen bilden kann.
-    """
-    if isinstance(obj, Flotte):
-        for e in obj.einheiten.values():
-            yield from _iter_achse_rad(e)
-    elif isinstance(obj, Einheit):
-        for dg in obj.drehgestelle.values():
-            yield from _iter_achse_rad(dg)
-    elif isinstance(obj, Drehgestell):
-        for a in obj.achsen.values():
-            yield from _iter_achse_rad(a)
-    elif isinstance(obj, Achse):
-        for side, r in obj.raeder.items():
-            side_val = getattr(side, "value", side)
-            if side_val == "unspecified":
-                continue
-            if not r.messreihen:
-                continue
-            yield obj, r
-
-
-def _rad_status_incl_axle(achse, rad) -> StatusAmpel:
-    """Rad-Status inkl. Achsen-direkter Messreihen.
-
-    STICHMASS_ABSTAND und SPURMASS_SR werden pro Achse erfasst (nicht
-    pro Rad) und haengen am Pseudo-Rad ``unspecified``. Fuer den Donut
-    muessen sie auf die echten Raeder (links/rechts) propagiert werden
-    — sonst zeigt die Tabelle rote Spur-Punkte, der Donut aber keine
-    roten Räder.
-    """
-    stati = [m.status for m in rad.messreihen.values()]
-    for side, other in achse.raeder.items():
-        side_val = getattr(side, "value", side)
-        if side_val != "unspecified":
-            continue
-        stati.extend(m.status for m in other.messreihen.values())
-    return _worst_status(stati)
-
-
-def _status_counts(obj) -> Dict[StatusAmpel, int]:
-    """Zaehlt Status pro Rad (schlechtester Status aus eigenen und
-    achsenweiten Messreihen)."""
-    counts = {StatusAmpel.GREEN: 0, StatusAmpel.YELLOW: 0,
-              StatusAmpel.RED: 0, StatusAmpel.GRAY: 0}
-    for achse, rad in _iter_achse_rad(obj):
-        st = _rad_status_incl_axle(achse, rad)
-        counts[st] = counts.get(st, 0) + 1
-    return counts
-
-
-def _collect_messgroessen_values(obj) -> Dict[str, Tuple[StatusAmpel, Optional[float]]]:
-    """Pro Messgroesse: Status und letzter Wert der schlechtesten Messreihe im Objekt."""
-    out_mr: Dict[str, "Messreihe"] = {}
-
-    def consider(mr):
-        out_mr[mr.messgroesse] = _worst_messreihe(out_mr.get(mr.messgroesse), mr)
-
-    if isinstance(obj, Einheit):
-        for dg in obj.drehgestelle.values():
-            for a in dg.achsen.values():
-                for r in a.raeder.values():
-                    for mr in r.messreihen.values():
-                        consider(mr)
-            for mr in dg.direkt_messreihen.values():
-                consider(mr)
-    elif isinstance(obj, Drehgestell):
-        for a in obj.achsen.values():
-            for r in a.raeder.values():
-                for mr in r.messreihen.values():
-                    consider(mr)
-        for mr in obj.direkt_messreihen.values():
-            consider(mr)
-    elif isinstance(obj, Achse):
-        for r in obj.raeder.values():
-            for mr in r.messreihen.values():
-                consider(mr)
-
-    result: Dict[str, Tuple[StatusAmpel, Optional[float]]] = {}
-    for name, mr in out_mr.items():
-        letzt = mr.letzter_wert()
-        result[name] = (mr.status, letzt.stand if letzt else None)
-    return result
-
-
-def _collect_messgroessen_statuses(obj) -> Dict[str, StatusAmpel]:
-    """Sammelt Status je Messgroesse ueber alle Raeder / direkt_messreihen des Objekts."""
-    out: Dict[str, StatusAmpel] = {}
-
-    def add(mr):
-        cur = out.get(mr.messgroesse, StatusAmpel.GRAY)
-        from ..data.models import _worst_status
-        out[mr.messgroesse] = _worst_status([cur, mr.status])
-
-    if isinstance(obj, Einheit):
-        for dg in obj.drehgestelle.values():
-            for a in dg.achsen.values():
-                for r in a.raeder.values():
-                    for mr in r.messreihen.values():
-                        add(mr)
-            for mr in dg.direkt_messreihen.values():
-                add(mr)
-    elif isinstance(obj, Drehgestell):
-        for a in obj.achsen.values():
-            for r in a.raeder.values():
-                for mr in r.messreihen.values():
-                    add(mr)
-        for mr in obj.direkt_messreihen.values():
-            add(mr)
-    elif isinstance(obj, Achse):
-        for r in obj.raeder.values():
-            for mr in r.messreihen.values():
-                add(mr)
-    return out
 
 
 # -----------------------------------------------------------
@@ -254,128 +117,6 @@ def _centered(inner: QWidget) -> QWidget:
     return wrap
 
 
-def _collect_gantt_entries(groups, flotte, prog_cfg):
-    """Sammelt Reprof-/Warn-/Grenz-Termine pro Gruppe (Einheit oder DG).
-
-    Die Werte werden direkt aus ``mr.prognose`` (Prognose-Tabelle)
-    gelesen — keine Live-Berechnung mehr.
-
-    * Warn-/Grenz-Datum stehen als Endpunkte in der Tabelle.
-    * Reprofilierungen werden aus ``prog.punkte`` extrahiert: zwei Punkte
-      am selben Datum, deren zweiter ``stand`` kleiner ist als der erste,
-      markieren eine prognostizierte Reprofilierung an diesem Datum.
-      Nur Reprofs in der Zukunft (nach heute) erscheinen im Gantt.
-
-    ``groups`` ist eine Liste ``(label, iterable_of_drehgestelle)``.
-    Rueckgabe: Liste von
-    ``(label, [(reprof_datum, achse_label), …],
-             [(warn_datum, achse_label), …],
-             [(grenz_datum, achse_label), …],
-             note | None)``.
-
-    Pro Achse wird nur das kritischste Rad eingezeichnet (frueheste
-    Grenzueberschreitung; sonst frueheste Warnung). Dessen Reprofs,
-    Warn- und Grenz-Marker werden aufgenommen.
-    """
-    heute = datetime.now()
-    out = []
-    _side = {"left": "links", "right": "rechts", "unspecified": "–"}
-    NOTE_NO_PROGNOSE = "keine Prognosedaten vorhanden"
-
-    def _future_reprofs(prog, mr) -> List[datetime]:
-        """Zukuenftige Reprof-Datumswerte aus prog.punkte extrahieren.
-
-        Die Prognose-Treppe ist im Backend an den letzten Messwert geankert
-        (damit sie im Diagramm nahtlos an die Historie anknuepft). Fuer die
-        Faelligkeits-Kachel muessen die Reprof-Termine aber ab heute gelten
-        — eine Lagerachse verschleisst nicht, die Restlebensdauer zaehlt ab
-        Wiederinbetriebnahme. Wir verschieben die Reprof-Datumswerte um
-        delta = heute − letzter Messwert (nur fuer ruhende Raeder).
-        """
-        pts = list(getattr(prog, "punkte", []) or [])
-        letzt = mr.letzter_wert() if mr is not None else None
-        delta = timedelta(0)
-        if letzt is not None and letzt.datum < heute:
-            delta = heute - letzt.datum
-        out_d: List[datetime] = []
-        for a, b in zip(pts, pts[1:]):
-            # Zwei Punkte am selben Datum und der zweite springt nach
-            # unten → prognostizierte Reprofilierung.
-            if a.datum == b.datum and b.stand < a.stand:
-                shifted = b.datum + delta
-                if shifted > heute:
-                    out_d.append(shifted)
-        return out_d
-
-    for label, dgs in groups:
-        reprofs: List[Tuple[datetime, str]] = []
-        warns: List[Tuple[datetime, str]] = []
-        grenze: List[Tuple[datetime, str]] = []
-        has_any_history = False
-        has_any_prognose = False
-        for dg in dgs:
-            for achse in dg.achsen.values():
-                rad_marker = []   # (reprofs, warn_d, grenz_d, axis_label)
-                for seite, rad in achse.raeder.items():
-                    mr = rad.messreihen.get("LKD")
-                    if mr is None or not mr.historie:
-                        continue
-                    has_any_history = True
-                    prog = mr.prognose
-                    if prog is None:
-                        continue
-                    # Verschiebung in die Zukunft: NUR fuer Faelligkeits-
-                    # Anzeigen (Kachel, KpiCards, Info-Box, Export).
-                    # Logik in logic.prognose.faelligkeit_shift.
-                    warn_d = faelligkeit_shift(prog.datum_warnwert, mr)
-                    grenz_d = faelligkeit_shift(prog.datum_grenzwert, mr)
-                    rad_reprofs = _future_reprofs(prog, mr)
-                    if (warn_d is None and grenz_d is None and not rad_reprofs):
-                        continue
-                    has_any_prognose = True
-                    axis_label = (
-                        f"{dg.dg_einbaupos} · {achse.rs_einbaupos} · "
-                        f"Rad {_side.get(seite.value, seite.value)}"
-                    )
-                    rad_marker.append(
-                        ([(d, axis_label) for d in rad_reprofs],
-                         warn_d, grenz_d, axis_label)
-                    )
-                if not rad_marker:
-                    continue
-                with_grenz = [r for r in rad_marker if r[2] is not None]
-                if with_grenz:
-                    crit = min(with_grenz, key=lambda r: r[2])
-                else:
-                    with_warn = [r for r in rad_marker if r[1] is not None]
-                    if with_warn:
-                        crit = min(with_warn, key=lambda r: r[1])
-                    else:
-                        crit = rad_marker[0]
-                rad_reprofs, warn_d, grenz_d, axis_label = crit
-                # Reprofs auf den Zeitraum bis zur Grenzueberschreitung begrenzen
-                if grenz_d is not None:
-                    rad_reprofs = [r for r in rad_reprofs if r[0] <= grenz_d]
-                reprofs.extend(rad_reprofs)
-                if warn_d is not None:
-                    warns.append((warn_d, axis_label))
-                if grenz_d is not None:
-                    grenze.append((grenz_d, axis_label))
-        reprofs.sort(key=lambda t: t[0])
-        warns.sort(key=lambda t: t[0])
-        grenze.sort(key=lambda t: t[0])
-        # Note nur anzeigen, wenn fuer diese Gruppe wirklich KEINE
-        # Prognose-Daten in der Tabelle stehen. Bei vorhandener Prognose,
-        # aber ohne Marker im Sichtfenster (alle Fälligkeiten liegen vor
-        # heute oder weit in der Zukunft), bleibt die Zeile leer.
-        if (reprofs or warns or grenze) or has_any_prognose:
-            note = None
-        else:
-            note = NOTE_NO_PROGNOSE
-        out.append((label, reprofs, warns, grenze, note))
-    return out
-
-
 def _set_ampel_cell(table: QTableWidget, row: int, col: int,
                     status: StatusAmpel, value: Optional[float] = None):
     """Setzt eine Status-Zelle gemaess globalem SHOW_VALUES-Modus.
@@ -397,6 +138,57 @@ def _set_ampel_cell(table: QTableWidget, row: int, col: int,
         table.setCellWidget(row, col, _centered(_value_cell_widget(status, value)))
     else:
         table.setCellWidget(row, col, _centered(AmpelDot(status, size=10)))
+
+
+# -----------------------------------------------------------
+# Spalte "Messdaten vorhanden" (Diagramm-Symbol ganz rechts)
+# -----------------------------------------------------------
+
+MESSDATEN_TOOLTIP = "Messdaten vorhanden"
+_messdaten_icon = None
+
+
+def _graph_icon():
+    """Diagramm-Symbol; erst beim ersten Gebrauch erzeugt (braucht QApplication)."""
+    global _messdaten_icon
+    if _messdaten_icon is None:
+        import qtawesome as qta
+        _messdaten_icon = qta.icon("mdi.chart-line", color="#378ADD")
+    return _messdaten_icon
+
+
+class _MessdatenItem(QTableWidgetItem):
+    """Zelle mit Diagramm-Symbol, wenn Messdaten vorhanden sind; sortiert danach."""
+    def __init__(self, has_data: bool):
+        super().__init__()
+        self.setData(Qt.UserRole, 1 if has_data else 0)
+        self.setFlags(self.flags() & ~Qt.ItemIsEditable)
+        self.setTextAlignment(Qt.AlignCenter)
+        if has_data:
+            self.setIcon(_graph_icon())
+            self.setToolTip(MESSDATEN_TOOLTIP)
+
+    def __lt__(self, other):
+        try:
+            return self.data(Qt.UserRole) < other.data(Qt.UserRole)
+        except TypeError:
+            return False
+
+
+def _set_messdaten_cell(table: QTableWidget, row: int, col: int, obj):
+    """Setzt das Diagramm-Symbol, wenn ``obj`` selbst oder eine darunterliegende
+    Komponente Messdaten hat; sonst bleibt die Zelle leer."""
+    table.setItem(row, col, _MessdatenItem(has_messdaten(obj)))
+
+
+def _setup_messdaten_column(table: QTableWidget, col: int):
+    """Schmale, feste Spalte ganz rechts."""
+    table.setIconSize(QSize(16, 16))
+    table.horizontalHeader().setSectionResizeMode(col, QHeaderView.Fixed)
+    table.setColumnWidth(col, 30)
+    item = table.horizontalHeaderItem(col)
+    if item is not None:
+        item.setToolTip(MESSDATEN_TOOLTIP)
 
 
 # -----------------------------------------------------------
@@ -538,13 +330,25 @@ class FlotteView(BaseView):
             self._layout.addLayout(self._overview_row)
 
     def set_flotte(self, flotte: Flotte):
+        # Waehrend des Fuellens loesen Sortier-Hook und Filter jeweils einen
+        # Neuaufbau der Faelligkeiten-Kachel aus (je ~0.7 s bei ~170
+        # Einheiten). Nur der abschliessende Aufbau ist noetig.
+        self._gantt_suspended = True
+        try:
+            self._fill_flotte(flotte)
+        finally:
+            self._gantt_suspended = False
+        # Initiales Gantt aus der aktuell sichtbaren Tabellen-Reihenfolge
+        self._rebuild_gantt_from_table()
+
+    def _fill_flotte(self, flotte: Flotte):
         self._einheiten = sorted(flotte.einheiten.values(), key=lambda e: e.topeinheit_bez)
         self._flotte = flotte   # fuer _on_selection_changed benoetigt
         self._ensure_overview()
         n_e = len(self._einheiten)
 
         # Donut
-        self._donut.canvas.set_counts(_status_counts(flotte), center_label="Räder")
+        self._donut.canvas.set_counts(status_counts(flotte), center_label="Räder")
 
         # Gantt wird spaeter aus der Tabellenreihenfolge gebaut (nach dem
         # Fuellen der Zeilen). Damit folgt die Kachel auch Sortierungen,
@@ -566,7 +370,8 @@ class FlotteView(BaseView):
             f"letzten Messwert)"
         )
         headers = ["", "Einheit", "Drehgestelle", "Achsen"] + \
-                  [MGROESSEN_LABEL[k] for k in MGROESSEN_SPALTEN]
+                  [MGROESSEN_LABEL[k] for k in MGROESSEN_SPALTEN] + [""]
+        c_data = len(headers) - 1
         self._table.setSortingEnabled(False)
         self._table.setColumnCount(len(headers))
         self._table.setHorizontalHeaderLabels(headers)
@@ -577,13 +382,14 @@ class FlotteView(BaseView):
         for row, e in enumerate(self._einheiten):
             _set_ampel_cell(self._table, row, 0, e.status())
             self._table.setItem(row, 1, QTableWidgetItem(e.topeinheit_bez))
-            self._table.setItem(row, 2, QTableWidgetItem(str(len(e.drehgestelle))))
+            self._table.setItem(row, 2, QTableWidgetItem(str(n_real_dg(e))))
             self._table.setItem(row, 3, QTableWidgetItem(
-                str(sum(len(dg.achsen) for dg in e.drehgestelle.values()))))
-            mg_data = _collect_messgroessen_values(e)
+                str(sum(n_real_achsen(dg) for dg in e.drehgestelle.values()))))
+            mg_data = collect_messgroessen_values(e)
             for i, mg in enumerate(MGROESSEN_SPALTEN):
                 s, v = mg_data.get(mg, (StatusAmpel.GRAY, None))
                 _set_ampel_cell(self._table, row, 4 + i, s, v)
+            _set_messdaten_cell(self._table, row, c_data, e)
         self._table.setSortingEnabled(True)
         self._apply_filter(self._filter_edit.text())
 
@@ -596,9 +402,7 @@ class FlotteView(BaseView):
             self._table.setColumnWidth(i, col_w)
         hdr.setSectionResizeMode(0, QHeaderView.Fixed)
         self._table.setColumnWidth(0, 28)
-
-        # Initiales Gantt aus der aktuell sichtbaren Tabellen-Reihenfolge
-        self._rebuild_gantt_from_table()
+        _setup_messdaten_column(self._table, c_data)
 
     def _apply_filter(self, text: str):
         super()._apply_filter(text)
@@ -612,6 +416,8 @@ class FlotteView(BaseView):
         (Sortierung + Filter beruecksichtigt)."""
         if not hasattr(self, "_gantt") or not self._einheiten:
             return
+        if getattr(self, "_gantt_suspended", False):
+            return
         flotte = getattr(self, "_flotte", None)
         if flotte is None:
             return
@@ -622,7 +428,7 @@ class FlotteView(BaseView):
             e = self._einheit_from_row(row)
             if e is not None:
                 ordered.append(e)
-        gantt_entries = _collect_gantt_entries(
+        gantt_entries = collect_gantt_entries(
             [(e.topeinheit_bez, e.drehgestelle.values()) for e in ordered],
             flotte, self._prog_cfg,
         )
@@ -646,12 +452,12 @@ class FlotteView(BaseView):
         row = self._selected_row()
         e = self._einheit_from_row(row)
         if e:
-            self._donut.canvas.set_counts(_status_counts(e), center_label="Räder")
+            self._donut.canvas.set_counts(status_counts(e), center_label="Räder")
             self._dp_title.setText(f"Status Verteilung · Räder · {e.topeinheit_bez}")
         else:
             if self._einheiten:
                 self._donut.canvas.set_counts(
-                    {s: sum(_status_counts(e).get(s, 0) for e in self._einheiten)
+                    {s: sum(status_counts(e).get(s, 0) for e in self._einheiten)
                      for s in StatusAmpel}, center_label="Räder")
                 self._dp_title.setText("Status Verteilung · alle Räder")
 
@@ -700,7 +506,7 @@ class EinheitView(BaseView):
         self._dgs = sorted(einheit.drehgestelle.values(), key=lambda d: d.dg_einbaupos)
         self._ensure_overview()
 
-        self._donut.canvas.set_counts(_status_counts(einheit), center_label="Räder")
+        self._donut.canvas.set_counts(status_counts(einheit), center_label="Räder")
         self._dp_title.setText(f"Status Verteilung · Räder · {einheit.topeinheit_bez}")
         self._gp_title.setText(f"Prognose Fälligkeiten LKD : Einheit {einheit.topeinheit_bez}")
         if not getattr(self, "_sort_hooked", False):
@@ -711,7 +517,8 @@ class EinheitView(BaseView):
         self._clear_kpis()
 
         self._panel_title.setText(f"Drehgestelle · {einheit.topeinheit_bez}")
-        headers = ["", "DG-Position", "Achsen"] + [MGROESSEN_LABEL[k] for k in MGROESSEN_SPALTEN]
+        headers = ["", "DG-Position", "Achsen"] + [MGROESSEN_LABEL[k] for k in MGROESSEN_SPALTEN] + [""]
+        c_data = len(headers) - 1
         self._table.setSortingEnabled(False)
         self._table.setColumnCount(len(headers))
         self._table.setHorizontalHeaderLabels(headers)
@@ -719,11 +526,12 @@ class EinheitView(BaseView):
         for row, dg in enumerate(self._dgs):
             _set_ampel_cell(self._table, row, 0, dg.status())
             self._table.setItem(row, 1, QTableWidgetItem(dg.dg_einbaupos))
-            self._table.setItem(row, 2, QTableWidgetItem(str(len(dg.achsen))))
-            mg_data = _collect_messgroessen_values(dg)
+            self._table.setItem(row, 2, QTableWidgetItem(str(n_real_achsen(dg))))
+            mg_data = collect_messgroessen_values(dg)
             for i, k in enumerate(MGROESSEN_SPALTEN):
                 s, v = mg_data.get(k, (StatusAmpel.GRAY, None))
                 _set_ampel_cell(self._table, row, 3 + i, s, v)
+            _set_messdaten_cell(self._table, row, c_data, dg)
         self._table.setSortingEnabled(True)
         self._apply_filter(self._filter_edit.text())
         self._table.resizeColumnsToContents()
@@ -756,7 +564,7 @@ class EinheitView(BaseView):
             dg = self._dg_from_row(row)
             if dg is not None:
                 ordered.append(dg)
-        gantt_entries = _collect_gantt_entries(
+        gantt_entries = collect_gantt_entries(
             [(dg.dg_einbaupos, [dg]) for dg in ordered],
             flotte, self._prog_cfg,
         )
@@ -783,7 +591,7 @@ class EinheitView(BaseView):
         row = self._selected_row()
         dg = self._dg_from_row(row)
         if dg:
-            self._donut.canvas.set_counts(_status_counts(dg), center_label=dg.dg_einbaupos)
+            self._donut.canvas.set_counts(status_counts(dg), center_label=dg.dg_einbaupos)
 
 
 # -----------------------------------------------------------
@@ -832,7 +640,7 @@ class DrehgestellView(BaseView):
         self._achsen = sorted(dg.achsen.values(), key=lambda a: a.rs_einbaupos)
         self._ensure_overview()
 
-        self._donut.canvas.set_counts(_status_counts(dg), center_label="Räder")
+        self._donut.canvas.set_counts(status_counts(dg), center_label="Räder")
         self._dp_title.setText(
             f"Status Verteilung · Räder · {einheit.topeinheit_bez} · {dg.dg_einbaupos}")
         self._gp_title.setText(
@@ -844,25 +652,34 @@ class DrehgestellView(BaseView):
 
         self._clear_kpis()
 
-        self._panel_title.setText(f"Achsen · {dg.dg_einbaupos}  ({len(self._achsen)} Achsen)")
-        headers = ["", "Achsen-Pos", "RS-Bezeichnung"] + [MGROESSEN_LABEL[k] for k in MGROESSEN_SPALTEN]
+        n_real = n_real_achsen(dg)
+        n_pos = n_messpositionen(dg)
+        if n_real == 0 and n_pos:
+            # Keine Radsatz-Ebene in den Daten: Raeder nach Messreihenfolge
+            self._panel_title.setText(
+                f"Messpositionen · {dg.dg_einbaupos}  ({n_pos} Messpositionen)")
+        else:
+            self._panel_title.setText(f"Achsen · {dg.dg_einbaupos}  ({n_real} Achsen)")
+        headers = ["", "Achsen-Pos", "RS-Bezeichnung"] + [MGROESSEN_LABEL[k] for k in MGROESSEN_SPALTEN] + [""]
+        c_data = len(headers) - 1
         self._table.setSortingEnabled(False)
         self._table.setColumnCount(len(headers))
         self._table.setHorizontalHeaderLabels(headers)
 
         # Eine Zeile pro Achse (nicht pro Rad). Status/Messwerte aggregieren
-        # beide Raeder; "schlechter gewinnt" (siehe _collect_messgroessen_values).
+        # beide Raeder; "schlechter gewinnt" (siehe collect_messgroessen_values).
         self._rows = list(self._achsen)
         self._table.setRowCount(len(self._rows))
         for row, a in enumerate(self._rows):
             status = a.status()
-            mg_data = _collect_messgroessen_values(a)
+            mg_data = collect_messgroessen_values(a)
             _set_ampel_cell(self._table, row, 0, status)
             self._table.setItem(row, 1, QTableWidgetItem(a.rs_einbaupos))
             self._table.setItem(row, 2, QTableWidgetItem(a.rs_bez))
             for i, k in enumerate(MGROESSEN_SPALTEN):
                 s, v = mg_data.get(k, (StatusAmpel.GRAY, None))
                 _set_ampel_cell(self._table, row, 3 + i, s, v)
+            _set_messdaten_cell(self._table, row, c_data, a)
         self._table.setSortingEnabled(True)
         self._apply_filter(self._filter_edit.text())
         self._table.resizeColumnsToContents()
@@ -874,6 +691,7 @@ class DrehgestellView(BaseView):
             self._table.setColumnWidth(i, col_w)
         hdr.setSectionResizeMode(0, QHeaderView.Fixed)
         self._table.setColumnWidth(0, 28)
+        _setup_messdaten_column(self._table, c_data)
 
         # Initiales Gantt aus der aktuellen Tabellen-Reihenfolge
         self._rebuild_gantt_from_table()
@@ -903,7 +721,7 @@ class DrehgestellView(BaseView):
                 "achsen": {a.rs_einbaupos: a},
             })()
             groups.append((a.rs_einbaupos, [pseudo_dg]))
-        gantt_entries = _collect_gantt_entries(groups, flotte, self._prog_cfg)
+        gantt_entries = collect_gantt_entries(groups, flotte, self._prog_cfg)
         self._gantt.canvas.set_entries(gantt_entries)
 
     def _achse_from_row(self, row):
@@ -928,7 +746,7 @@ class DrehgestellView(BaseView):
         row = self._selected_row()
         a = self._achse_from_row(row)
         if a:
-            self._donut.canvas.set_counts(_status_counts(a), center_label="Räder")
+            self._donut.canvas.set_counts(status_counts(a), center_label="Räder")
             self._dp_title.setText(
                 f"Status Verteilung · Räder · "
                 f"{self._einheit.topeinheit_bez} · {self._dg.dg_einbaupos} · {a.rs_einbaupos}"
@@ -1055,7 +873,42 @@ class AchseView(QWidget):
         if self._tabs.count() == 0:
             self._tabs.addTab(QLabel("Keine Messreihen vorhanden."), "–")
         self._tabs.currentChanged.connect(self._redraw_current)
+        self._sync_controls()
         self._redraw_current()
+
+    def _sync_controls(self):
+        """Passt X-Achse und Radauswahl an die geoeffnete Achse an.
+
+        Die Ansicht wird fuer alle Achsen wiederverwendet; eine fruehere Auswahl
+        (``Laufleistung [km]``, ``Nur links``) bliebe sonst stehen. Bei Abellio/MOB
+        gibt es weder Laufleistung noch Radseite -> das Diagramm waere leer.
+        Nicht verfuegbare Auswahl wird deaktiviert und auf den Standard gesetzt.
+        """
+        raeder = self._achse.raeder
+        has_km = any(mp.laufleistung is not None
+                     for r in raeder.values() for mr in r.messreihen.values()
+                     for mp in mr.historie)
+        sided = any(side != Side.UNSPECIFIED for side in raeder)
+
+        km_item = self._x_combo.model().item(1)
+        km_item.setEnabled(has_km)
+        self._x_combo.setItemData(
+            1, "" if has_km else "Keine Laufleistung in den Daten dieser Achse",
+            Qt.ToolTipRole)
+        if not has_km and self._x_combo.currentIndex() != 0:
+            self._x_combo.blockSignals(True)
+            self._x_combo.setCurrentIndex(0)
+            self._x_combo.blockSignals(False)
+            self._x_mode = "datum"
+
+        self._side_combo.setEnabled(sided)
+        self._side_combo.setToolTip(
+            "" if sided else "Die Messwerte dieser Achse haben keine Radseite")
+        if not sided and self._side_combo.currentIndex() != 0:
+            self._side_combo.blockSignals(True)
+            self._side_combo.setCurrentIndex(0)
+            self._side_combo.blockSignals(False)
+            self._side_filter = "both"
 
     def _collect_messgroessen(self):
         """Alle Messgroessen, die auf dieser Achse ueberhaupt vorkommen."""
@@ -1270,41 +1123,10 @@ class LagerView(BaseView):
                 lambda *_: self._rebuild_gantt_from_table())
             self._sort_hooked = True
 
-        # Donut: Status-Verteilung — ein Status pro Rad (schlechteste
-        # Messreihe des Rades + ggf. Achsen-direkte STICHMASS/SPURMASS).
-        # Nur die aktuell sichtbaren Lagerkomponenten (Filter beachten).
-        status_counts = {s: 0 for s in StatusAmpel}
-
-        def _unspec_axle_stati(axle) -> List[StatusAmpel]:
-            out = []
-            for side, other in axle.raeder.items():
-                side_val = getattr(side, "value", side)
-                if side_val != "unspecified":
-                    continue
-                out.extend(m.status for m in other.messreihen.values())
-            return out
-
-        def _count_axle(axle):
-            axle_extra = _unspec_axle_stati(axle)
-            for side, rad in axle.raeder.items():
-                side_val = getattr(side, "value", side)
-                if side_val == "unspecified":
-                    continue
-                if not rad.messreihen and not axle_extra:
-                    continue
-                stati = [m.status for m in rad.messreihen.values()] + axle_extra
-                st = _worst_status(stati)
-                status_counts[st] = status_counts.get(st, 0) + 1
-
-        for c in items:
-            if c.kind == "achse":
-                # Lagerachse selbst ist die Achse → raeder haengen direkt.
-                _count_axle(c)
-            else:
-                # Drehgestell im Lager: ueber seine Achsen zaehlen.
-                for a in c.achsen.values():
-                    _count_axle(a)
-        self._donut.canvas.set_counts(status_counts, center_label="Räder")
+        # Donut: Status-Verteilung — ein Status pro Rad; nur die aktuell
+        # sichtbaren Lagerkomponenten (Filter beachten). Gleiche Zaehlregel
+        # wie in allen anderen Ansichten (logic.aggregation.status_counts).
+        self._donut.canvas.set_counts(status_counts(items), center_label="Räder")
 
         self._clear_kpis()
 
@@ -1322,7 +1144,8 @@ class LagerView(BaseView):
         self._dp_title.setText(f"Status Verteilung · Lager-Räder{suffix}")
 
         headers = ["", "Typ", "Bezeichnung", "letzte Einheit", "Ausbau", "Zustand"] + \
-                  [MGROESSEN_LABEL[k] for k in MGROESSEN_SPALTEN]
+                  [MGROESSEN_LABEL[k] for k in MGROESSEN_SPALTEN] + [""]
+        c_data = len(headers) - 1
         # Beim Fuellen temporaer Sortierung aus, sonst wandern Zeilen beim Einfuegen
         self._table.setSortingEnabled(False)
         self._table.setColumnCount(len(headers))
@@ -1352,6 +1175,7 @@ class LagerView(BaseView):
             for j, k in enumerate(MGROESSEN_SPALTEN):
                 s, v = mg_data.get(k, (StatusAmpel.GRAY, None))
                 _set_ampel_cell(self._table, i, 6 + j, s, v)
+            _set_messdaten_cell(self._table, i, c_data, c)
         self._table.setSortingEnabled(True)
 
         self._table.resizeColumnsToContents()
@@ -1366,6 +1190,7 @@ class LagerView(BaseView):
         for j in range(6, 6 + len(MGROESSEN_SPALTEN)):
             hdr.setSectionResizeMode(j, QHeaderView.Fixed)
             self._table.setColumnWidth(j, col_w)
+        _setup_messdaten_column(self._table, c_data)
 
         # Gantt-Kachel aus der aktuellen Zeilenreihenfolge aufbauen
         self._rebuild_gantt_from_table()
@@ -1384,7 +1209,12 @@ class LagerView(BaseView):
         * ``kind == 'achse'`` → Pseudo-DG, der genau eine Pseudo-Achse mit
           den Raedern dieser Lagerachse enthaelt.
         """
-        if not hasattr(self, "_gantt") or not self._items:
+        if not hasattr(self, "_gantt"):
+            return
+        if not self._items:
+            # Leeres Lager (z.B. MOB): Hinweis statt Standard-Diagramm bzw.
+            # Resten des vorherigen Profils.
+            self._gantt.canvas.set_entries([])
             return
         ordered = []
         for row in range(self._table.rowCount()):
@@ -1412,7 +1242,7 @@ class LagerView(BaseView):
                 })()
             groups.append((label, [pseudo_dg]))
         flotte = self._flotte_ref or type("F", (), {"einheiten": {}})()
-        gantt_entries = _collect_gantt_entries(groups, flotte, self._prog_cfg)
+        gantt_entries = collect_gantt_entries(groups, flotte, self._prog_cfg)
         self._gantt.canvas.set_entries(gantt_entries, horizon_months=12)
 
     def _row_to_component(self, row: int) -> Optional[LagerKomponente]:

@@ -282,41 +282,48 @@ def _prognose_sql(profile) -> str:
 
 def _parse_flotte_rows(rows, header, profile) -> Flotte:
     """Parst BO_RADSATZDATEN-Zeilen in eine ``Flotte``."""
-    from .csv_source import _add_installed, _add_lager, _parse_float, _get
-    from .models import Messpunkt
+    from datetime import datetime
+
+    from .csv_source import (
+        _add_installed, _add_lager, _get, _make_messpunkt, _parse_float,
+        finalize_structure,
+    )
 
     flotte = Flotte()
     lager_map = {}
     idx = {profile.columns_raw[name]: i for i, name in enumerate(header) if name in profile.columns_raw}
+    zi = idx.get("zartbez", -1)
+    stats = dict(rows=len(rows), unknown_zartbez=0, invalid_value=0, dropped=0,
+                 lager_unassigned=0)
 
-    from datetime import datetime
     for row in rows:
+        # Messgroesse zuerst klassifizieren: unbekannte Zeilen (z.B.
+        # Bremsscheiben) werden verworfen, bevor die teure Textkonvertierung
+        # aller Spalten laeuft.
+        cls = profile.classify_zartbez(row[zi] if zi >= 0 and row[zi] is not None else "")
+        if cls is None:
+            stats["unknown_zartbez"] += 1
+            continue
+        mdef, side = cls
         row_s = [
             ("" if v is None else
              (v.strftime(profile.date_format) if hasattr(v, "strftime") else str(v)))
             for v in row
         ]
-        zartbez = row_s[idx.get("zartbez", -1)] if "zartbez" in idx else ""
-        cls = profile.classify_zartbez(zartbez)
-        if cls is None:
-            continue
-        mdef, side = cls
         datum_s = _get(row_s, idx, "datum")
         stand = _parse_float(_get(row_s, idx, "stand"), profile.decimal)
         if not datum_s or stand is None:
+            stats["dropped"] += 1
             continue
         try:
             datum = datetime.strptime(datum_s, profile.date_format)
         except ValueError:
+            stats["dropped"] += 1
             continue
-        mp = Messpunkt(
-            datum=datum, stand=stand,
-            laufleistung=_parse_float(_get(row_s, idx, "laufleistung"), profile.decimal),
-            min_val=_parse_float(_get(row_s, idx, "min_val"), profile.decimal),
-            max_val=_parse_float(_get(row_s, idx, "max_val"), profile.decimal),
-            gelb_min=_parse_float(_get(row_s, idx, "gelb_min"), profile.decimal),
-            gelb_max=_parse_float(_get(row_s, idx, "gelb_max"), profile.decimal),
-        )
+        mp = _make_messpunkt(lambda k: _get(row_s, idx, k), profile, mdef, datum, stand)
+        if mp is None:
+            stats["invalid_value"] += 1
+            continue
         ausbau_s = _get(row_s, idx, "ausbau")
         try:
             ausbau = datetime.strptime(ausbau_s, profile.date_format) if ausbau_s else None
@@ -326,9 +333,11 @@ def _parse_flotte_rows(rows, header, profile) -> Flotte:
         aktuell = int(float(aktuell_s)) if aktuell_s else 0
         if ausbau is None and aktuell == 1:
             _add_installed(flotte, row_s, idx, profile, mdef, side, mp)
-        else:
-            _add_lager(lager_map, row_s, idx, profile, mdef, side, mp, ausbau)
+        elif not _add_lager(lager_map, row_s, idx, profile, mdef, side, mp, ausbau):
+            stats["lager_unassigned"] += 1
     flotte.lager = list(lager_map.values())
+    finalize_structure(flotte, profile)
+    log.info("Oracle-Rohdaten verarbeitet (%s): %s", profile.name, stats)
     return flotte
 
 
@@ -542,44 +551,4 @@ def load_flotte_from_oracle(
         t_init1 - t_init0, t_conn - t_init1, t_exec - t_conn, t_fetch - t_exec,
     )
 
-    # Delegiere Row-Verarbeitung an denselben Pfad wie CSV
-    from .csv_source import _add_installed, _add_lager, _parse_datetime, _parse_int
-    from .models import Flotte, Messpunkt, Side
-
-    flotte = Flotte()
-    lager_map = {}
-    idx = {profile.columns_raw[name]: i for i, name in enumerate(header) if name in profile.columns_raw}
-
-    for row in rows:
-        row_s = [("" if v is None else (v.strftime(profile.date_format) if hasattr(v, "strftime") else str(v))) for v in row]
-        zartbez = row_s[idx.get("zartbez", -1)] if "zartbez" in idx else ""
-        cls = profile.classify_zartbez(zartbez)
-        if cls is None:
-            continue
-        mdef, side = cls
-        # Reuse der CSV-Hilfsroutinen:
-        from .csv_source import load_raw_csv  # noqa (zur Dokumentation)
-        # Konstruktion eines Messpunkts direkt aus den Row-Strings:
-        from .csv_source import _parse_float, _get
-        datum = _parse_datetime(_get(row_s, idx, "datum"), profile.date_format)
-        stand = _parse_float(_get(row_s, idx, "stand"), profile.decimal)
-        if datum is None or stand is None:
-            continue
-        mp = Messpunkt(
-            datum=datum,
-            stand=stand,
-            laufleistung=_parse_float(_get(row_s, idx, "laufleistung"), profile.decimal),
-            min_val=_parse_float(_get(row_s, idx, "min_val"), profile.decimal),
-            max_val=_parse_float(_get(row_s, idx, "max_val"), profile.decimal),
-            gelb_min=_parse_float(_get(row_s, idx, "gelb_min"), profile.decimal),
-            gelb_max=_parse_float(_get(row_s, idx, "gelb_max"), profile.decimal),
-        )
-        ausbau = _parse_datetime(_get(row_s, idx, "ausbau"), profile.date_format)
-        aktuell = _parse_int(_get(row_s, idx, "aktuell")) or 0
-        if ausbau is None and aktuell == 1:
-            _add_installed(flotte, row_s, idx, profile, mdef, side, mp)
-        else:
-            _add_lager(lager_map, row_s, idx, profile, mdef, side, mp, ausbau)
-
-    flotte.lager = list(lager_map.values())
-    return flotte
+    return _parse_flotte_rows(rows, header, profile)

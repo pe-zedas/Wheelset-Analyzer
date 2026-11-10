@@ -1,6 +1,19 @@
-# Kundenprofil MOB (Montreux-Oberland-Bahn, FR, 23 Spalten)
+# Kundenprofil MOB (Montreux-Oberland-Bahn, franzoesische Zaehlerbezeichnungen)
+#
+# Auf Basis der echten Daten (BO_RADSATZDATEN, 104 Zeilen, 08/2024 - 01/2025):
+#  - Nur Drehgestell-Ebene: RSEINHEITID/RSEINBAUPOS sind immer leer.
+#  - Je Drehgestell und Messtermin gibt es 4 Werte im Minutenabstand (die vier
+#    Raeder des Drehgestells) unter demselben Zaehler, ohne Seiten- oder
+#    Achsangabe. Sie werden nach der Messreihenfolge auf "Messposition 1..4"
+#    verteilt (structure.wheel_positions). Die Zuordnung zur Radnummer am
+#    Fahrzeug ist daraus nicht belegt.
+#  - Es gibt weder LAUFLEISTUNG noch Grenzwerte (MIN/MAX/MIN_BEREICH leer) ->
+#    Ampel grau, keine Prognose moeglich.
+#  - Bezeichnungen tragen teils Leerzeichen am Ende ("Creux ", "Cote qR ").
+#  - "Creux" (Hohllauf) ist durchgehend 0 - das ist hier ein gueltiger Messwert.
+#  - Prognose-Tabelle hat dieselben Spalten wie bei VGF (LETZTEAENDZEIT).
 name: mob
-description: Montreux-Oberland-Bahn - neues Schema, franzoesische Zaehlerbezeichnungen, teilweise ohne Radsatz-Ebene
+description: Montreux-Oberland-Bahn - nur Drehgestell-Ebene, vier Raeder je Zaehler, franzoesische Bezeichnungen
 
 csv:
   delimiter: ";"
@@ -8,6 +21,7 @@ csv:
   date_format: "%Y-%m-%d %H:%M:%S"
   decimal: "."
 
+# Nicht gelesen (im Dashboard ungenutzt): ZAEHLERHISTORIEID, LASTRUNID, LASTUPDATE
 columns_raw:
   TOPEINHEITID: topeinheit_id
   TOPEINHEITBEZEICHNUNG: topeinheit_bez
@@ -22,16 +36,13 @@ columns_raw:
   AKTUELL: aktuell
   ZAEHLERARTID: zaehlerart_id
   ZARTBEZ: zartbez
-  ZAEHLERHISTORIEID: zaehlerhistorie_id
   STAND: stand
   DATUM: datum
   MIN: min_val
   MAX: max_val
-  MIN_BEREICH: gelb_min
-  MAX_BEREICH: gelb_max
+  MIN_BEREICH: bereich_min
+  MAX_BEREICH: bereich_max
   LAUFLEISTUNG: laufleistung
-  LASTRUNID: lastrun_id
-  LASTUPDATE: letzteaendzeit
 
 columns_prognose:
   TOPEINHEITID: topeinheit_id
@@ -41,7 +52,7 @@ columns_prognose:
   STAND: stand
   DATUM: datum
   LAUFLEISTUNG: laufleistung
-  LASTUPDATE: letzteaendzeit
+  LETZTEAENDZEIT: letzteaendzeit
   KM_WARNWERT: km_warnwert
   DATUM_WARNWERT: datum_warnwert
   KM_GRENZWERT: km_grenzwert
@@ -51,58 +62,83 @@ columns_prognose:
 
 required_measurement_fields:
   base: [datum, stand]
-  prognosis_eligible: [datum, stand, laufleistung, min_val, max_val, gelb_min]
+  prognosis_eligible: [datum, stand, laufleistung, min_val, max_val]
 
-# MOB-Export hat keine Radsatz-Ebene (RSEINHEITID etc. leer)
-hierarchy_depth: 3
+# Das Dashboard navigiert immer Einheit > Drehgestell > Achse > Diagramm. Ohne
+# Radsatz-Ebene haengen die Messwerte an einer Sammel-Achse, damit sie ueber das
+# Diagramm erreichbar sind (sonst blieben sie nur in der Status-Summe sichtbar).
+hierarchy_depth: 4
 
+structure:
+  # DG-Position ("Bogie EV 1 (IO)") ist bei allen Drehgestellen gleich und ein
+  # Drehgestell wechselt die Einheit -> ueber die DG-ID fuehren.
+  dg_key: id
+  fallback_axle: true
+  # Je Messtermin liefert die Messanlage 4 Werte je Messgroesse nacheinander
+  # (Abstand ca. 1 Minute). Der k-te Wert eines Termins -> "Messposition k"
+  # (Messreihenfolge, nicht nachgewiesen die Radnummer am Fahrzeug). Termine mit
+  # einer anderen Anzahl Werte bleiben in der Sammel-Achse.
+  wheel_positions: 4
+
+thresholds:
+  # In der MOB-Datenbank sind die Spalten derzeit leer. Gleiches Schema wie
+  # Abellio, dort sind MIN_BEREICH/MAX_BEREICH Toleranzbereiche (Grenzwerte).
+  bereich_as_limits: true
+
+# valid_range: Werte ausserhalb werden verworfen (0 = Platzhalter ohne Messung).
+# Hohllauf ("Creux") und Ueberwalzung ("Refoulement"): 0 ist gueltig -> kein Bereich.
 measurement_catalog:
   LKD:
     patterns:
-      - regex: "^Diamètre de roue\\s*$"
+      - regex: '^Diamètre de roue\s*$'
         side: unspecified
     unit: mm
     direction: decreasing
     prognosis: true
+    valid_range: [300, 1500]
   SPURKRANZDICKE_SD:
     patterns:
-      - regex: "^Epaisseur du boudin\\s*$"
+      - regex: '^Epaisseur du boudin\s*$'
         side: unspecified
     unit: mm
     direction: decreasing
     prognosis: false
+    valid_range: [10, 60]
   SPURKRANZHOEHE_SH:
     patterns:
-      - regex: "^Hauteur du boudin\\s*$"
+      - regex: '^Hauteur du boudin\s*$'
         side: unspecified
     unit: mm
     direction: increasing
     prognosis: false
+    valid_range: [10, 60]
   SPURKRANZFLANKE_QR:
     patterns:
-      - regex: "^Cote qR\\s*$"
+      - regex: '^Cote qR\s*$'
         side: unspecified
     unit: mm
     direction: decreasing
     prognosis: false
+    valid_range: [1, 30]
   HOHLLAUF:
     patterns:
-      - regex: "^Creux\\s*$"
+      - regex: '^Creux\s*$'
         side: unspecified
     unit: mm
     direction: increasing
     prognosis: false
   UEBERWALZUNG:
     patterns:
-      - regex: "^Refoulement\\s*$"
+      - regex: '^Refoulement\s*$'
         side: unspecified
     unit: mm
     direction: increasing
     prognosis: false
   RADBREITE:
     patterns:
-      - regex: "^Largeur de roue\\s*$"
+      - regex: '^Largeur de roue\s*$'
         side: unspecified
     unit: mm
     direction: decreasing
     prognosis: false
+    valid_range: [100, 200]

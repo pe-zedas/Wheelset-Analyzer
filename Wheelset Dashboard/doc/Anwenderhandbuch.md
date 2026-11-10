@@ -201,7 +201,8 @@ Was man machen kann:
 - **Oben links:** Breadcrumb mit dem aktuellen Navigationspfad,
   z. B. `Flotte › FLIRT 101 › Laufdrehgestell 1`. Jeder Eintrag ist
   klickbar und führt in die zugehörige Ebene zurück.
-- **Oben rechts:** zedas®-asset-Logo.
+- **Oben rechts:** Marke mit dem aktiven **Schema** (Kundenprofil, z. B. `Schema: Abellio`) und das zedas®-asset-Logo.
+  Das Schema bestimmt Spaltenzuordnung und Messgrößen-Namen; es wird in den Einstellungen unter *Allgemein* gewählt.
 - **Linker Rand (Sidenav):** Hauptbereiche *Flotte* und *Lager ·
   Komponenten* sowie *Einstellungen*.
 - **Unten (Statusleiste):**

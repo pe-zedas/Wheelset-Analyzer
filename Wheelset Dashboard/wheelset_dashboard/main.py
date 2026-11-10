@@ -103,8 +103,8 @@ def main():
             cf_shown = cf
         else:
             # Standard: eigenes Config-Verzeichnis des Dashboards
-            connect_string = env or read_oracle_connect_string()
-            cf_shown = ORACLE_CONNECT_FILE
+            connect_string = env or read_oracle_connect_string(args.profile)
+            cf_shown = f"{ORACLE_CONNECT_FILE} (Eintrag '{args.profile}')"
         if not connect_string:
             raise SystemExit(f"Oracle-Modus: Connect-String nicht gefunden ({cf_shown}).")
         repo = Repository(RepositoryConfig(
@@ -131,7 +131,7 @@ def main():
 
     win = MainWindow(repo)
     t2 = _time.monotonic()
-    _log.debug("Start-Timing: MainWindow-Init (inkl. reload_data)=%.2fs", t2 - t1)
+    _log.debug("Start-Timing: MainWindow-Init (Daten laden im Hintergrund)=%.2fs", t2 - t1)
 
     def _ui_crash(exc_type, exc_value, exc_tb):
         QMessageBox.critical(win, "Unerwarteter Fehler",

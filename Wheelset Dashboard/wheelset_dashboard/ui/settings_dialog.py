@@ -215,6 +215,10 @@ class SettingsDialog(QDialog):
         self.oracle_user = QLineEdit(config.get("oracle_user", ""))
         self.oracle_pw = QLineEdit(config.get("oracle_password", ""))
         self.oracle_pw.setEchoMode(QLineEdit.Password)
+        # Beim Profilwechsel die Zugangsdaten des Kunden laden. Beim Oeffnen
+        # nur, wenn die Felder leer sind (App wurde mit Connect-String-Datei
+        # gestartet) — bereits gesetzte Werte bleiben unangetastet.
+        self.profile.currentTextChanged.connect(self._load_oracle_for_profile)
         form.addRow("Oracle DSN", self.oracle_dsn)
         form.addRow("Oracle User", self.oracle_user)
         form.addRow("Oracle Passwort", self.oracle_pw)
@@ -231,6 +235,10 @@ class SettingsDialog(QDialog):
         self._test_result.setWordWrap(True)
         self._test_result.setStyleSheet("color: #6B6F78; font-size: 11px;")
         form.addRow("", self._test_result)
+
+        if not (self.oracle_dsn.text() or self.oracle_user.text()
+                or self.oracle_pw.text()):
+            self._load_oracle_for_profile(self.profile.currentText())
 
     def _build_page_prognose_lkd_reprof(self, config: dict):
         form = self._new_page(
@@ -328,6 +336,27 @@ class SettingsDialog(QDialog):
         title, page_idx = info
         self._page_header.setText(title)
         self._stack.setCurrentIndex(page_idx)
+
+    def _load_oracle_for_profile(self, profile: str):
+        """Fuellt DSN, Nutzer und Passwort aus der Connect-String-Datei des
+        Kundenprofils. Gibt es keine, werden die Felder geleert, damit keine
+        Zugangsdaten eines anderen Kunden stehen bleiben."""
+        from ..config.app_paths import (
+            ORACLE_CONNECT_FILE, parse_connect_string, read_oracle_connect_string,
+        )
+        cs = read_oracle_connect_string(profile)
+        if cs:
+            user, pw, dsn = parse_connect_string(cs)
+            hint = ""
+        else:
+            user = pw = dsn = ""
+            hint = (f"Kein Connect-String für '{profile}' hinterlegt. Erwartet "
+                    f"in {ORACLE_CONNECT_FILE} als Zeile: {profile} = user/passwort@dsn")
+        self.oracle_user.setText(user)
+        self.oracle_pw.setText(pw)
+        self.oracle_dsn.setText(dsn)
+        self._test_result.setStyleSheet("color: #6B6F78; font-size: 11px;")
+        self._test_result.setText(hint)
 
     def _on_test_connection(self):
         from ..data.oracle_source import OracleConnectionError, test_connection

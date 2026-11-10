@@ -35,7 +35,7 @@ from .logic.status import recompute_all as recompute_status
 DEFAULT_CONNECT_FILE = ORACLE_CONNECT_FILE
 
 
-def _load_connect_string(explicit: str | None) -> str:
+def _load_connect_string(explicit: str | None, profile: str = "vgf") -> str:
     if explicit:
         p = Path(explicit)
         line = p.read_text(encoding="utf-8").splitlines()[0].strip()
@@ -47,11 +47,12 @@ def _load_connect_string(explicit: str | None) -> str:
     if env:
         return env
 
-    line = read_oracle_connect_string()
+    line = read_oracle_connect_string(profile)
     if not line:
         raise SystemExit(
             f"Kein Connect-String gefunden. Erwartet via --connect-file, "
-            f"ORACLE_CONNECT_STRING oder {ORACLE_CONNECT_FILE}"
+            f"ORACLE_CONNECT_STRING oder Zeile '{profile} = user/pw@dsn' in "
+            f"{ORACLE_CONNECT_FILE}"
         )
     return line
 
@@ -70,7 +71,7 @@ def main():
     setup_logging(level="INFO", log_file="oracle_e2e.log")
     log = logging.getLogger(__name__)
 
-    conn_str = _load_connect_string(args.connect_file)
+    conn_str = _load_connect_string(args.connect_file, args.profile)
     log.info("Connect-String geladen (Laenge %d Zeichen, Inhalt nicht geloggt)", len(conn_str))
 
     print("1) Testverbindung...")
