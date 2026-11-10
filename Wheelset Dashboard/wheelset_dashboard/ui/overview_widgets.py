@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import matplotlib
 matplotlib.use("QtAgg")
 import matplotlib.dates as mdates
+import matplotlib.ticker as mticker
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 
@@ -76,6 +77,24 @@ class DonutCanvas(FigureCanvasQTAgg):
         ax.set_axis_off()
         self.figure.subplots_adjust(left=0.02, right=0.60, top=0.95, bottom=0.05)
         self.draw_idle()
+
+
+def _normalize_entries(entries):
+    """Bringt die erlaubten Eintragsformate (siehe ``set_entries``) auf
+    ``(label, reprofs, warns, grenze, note)`` mit Terminlisten."""
+    norm = []
+    for e in entries:
+        note: Optional[str] = None
+        if len(e) == 3:
+            label, warns_raw, grenze_raw = e
+            reprofs_raw = []
+        elif len(e) == 4:
+            label, reprofs_raw, warns_raw, grenze_raw = e
+        else:
+            label, reprofs_raw, warns_raw, grenze_raw, note = e
+        norm.append((label, _as_date_list(reprofs_raw), _as_date_list(warns_raw),
+                     _as_date_list(grenze_raw), note))
+    return norm
 
 
 class GanttCanvas(FigureCanvasQTAgg):
@@ -213,26 +232,10 @@ class GanttCanvas(FigureCanvasQTAgg):
         ax.clear()
         self._markers.clear()
 
-        # Normalisieren: (label, reprofs, warns, grenze, note).
-        # KEINE Umsortierung — die Reihenfolge entspricht 1:1 der vom
-        # Aufrufer uebergebenen ``entries``-Liste. Damit folgt die Kachel
-        # der Sortierung der darueberliegenden Tabelle.
-        norm = []
-        for e in entries:
-            note: Optional[str] = None
-            if len(e) == 3:
-                label, warn, grenz = e
-                reprofs_raw = []
-                warns_raw = warn
-                grenze_raw = grenz
-            elif len(e) == 4:
-                label, reprofs_raw, warns_raw, grenze_raw = e
-            else:
-                label, reprofs_raw, warns_raw, grenze_raw, note = e
-            reprofs = _as_date_list(reprofs_raw)
-            warns = _as_date_list(warns_raw)
-            grenze = _as_date_list(grenze_raw)
-            norm.append((label, reprofs, warns, grenze, note))
+        # KEINE Umsortierung — die Reihenfolge entspricht 1:1 der vom Aufrufer
+        # uebergebenen ``entries``-Liste. Damit folgt die Kachel der Sortierung
+        # der darueberliegenden Tabelle.
+        norm = _normalize_entries(entries)
         self._resize_for_rows(len(norm))
 
         if not norm:
@@ -251,8 +254,7 @@ class GanttCanvas(FigureCanvasQTAgg):
         horizon_end = now + timedelta(days=horizon_months * 30)
 
         labels = [x[0] for x in norm]
-        y = list(range(len(norm)))
-        ax.set_yticks(y)
+        ax.set_yticks(list(range(len(norm))))
         ax.set_yticklabels(labels, fontsize=9)
         ax.invert_yaxis()
         ax.set_xlim(now, horizon_end)
@@ -261,78 +263,69 @@ class GanttCanvas(FigureCanvasQTAgg):
         # immer direkt unter dem oberen Rand liegt.
         ax.set_ylim(len(norm) - 0.5, -0.8)
 
-        # Farben:
-        # Reprofilierung  → hellblau   (geplante Werkstattaktion)
-        # Warn (GELB_MIN) → orange     (naechste Unterschreitung der Warngrenze)
-        # Grenz (MIN)     → rot        (naechste Unterschreitung des Grenzwerts)
-        COL_REPROF = "#8FC7F0"
+        self._draw_rows(norm, now, horizon_end)
+        ax.axvline(now, color="#378ADD", linestyle="--", linewidth=1, alpha=0.7)
+        ax.text(now, -0.6, " heute", color="#378ADD", fontsize=8, va="bottom")
+        self._format_time_axis()
+        self.draw_idle()
+        # Slider-Range an das spaeteste Grenzdatum anpassen
+        pane = getattr(self, "_pane", None)
+        if pane is not None:
+            pane.refresh_slider()
 
+    # Marker je Terminart: (Titel im Tooltip, scatter-Argumente).
+    # Reprofilierung → hellblau (geplante Werkstattaktion),
+    # Warn (GELB_MIN) → orange (naechste Unterschreitung der Warngrenze),
+    # Grenz (MIN) → rot (naechste Unterschreitung des Grenzwerts).
+    _MARKER_STYLES = (
+        ("Reprofilierung", dict(marker="s", color="#8FC7F0", s=60, zorder=3)),
+        ("Warnschwelle unterschritten",
+         dict(marker="o", color=AMPEL_COLORS[StatusAmpel.YELLOW], s=70, zorder=4)),
+        ("Grenzwert unterschritten",
+         dict(marker="D", color=AMPEL_COLORS[StatusAmpel.RED], s=70, zorder=5)),
+    )
+
+    def _draw_rows(self, norm, now, horizon_end):
+        """Eine Gantt-Zeile je Eintrag: Hintergrundband, Marker, Platzhaltertext."""
+        ax = self._ax
         # Marker-Treffer-Toleranz: 1 % des sichtbaren Zeitbereichs in Tagen
         span_days = max((horizon_end - now).days, 1)
         hit_radius_days = max(span_days * 0.01, 1.5)
 
         for i, (label, reprofs, warns, grenze, note) in enumerate(norm):
             ax.hlines(i, now, horizon_end, color="#F0F2F6", linewidth=10, zorder=1)
-            # Reprofs als hellblaue Quadrate
-            for d, achs in reprofs:
-                if d is None or not (now <= d <= horizon_end):
-                    continue
-                ax.scatter([d], [i], marker="s", color=COL_REPROF,
-                           s=60, zorder=3, edgecolor="#FFFFFF", linewidths=1)
-                tip = (f"Reprofilierung\n{d.strftime('%Y-%m-%d')}\n"
-                       f"{achs}" if achs else
-                       f"Reprofilierung\n{d.strftime('%Y-%m-%d')}")
-                self._markers.append((d, i, hit_radius_days, 0.35, tip))
-            for d, achs in warns:
-                if d is None or not (now <= d <= horizon_end):
-                    continue
-                ax.scatter([d], [i], color=AMPEL_COLORS[StatusAmpel.YELLOW],
-                           s=70, zorder=4, edgecolor="#FFFFFF", linewidths=1)
-                tip = (f"Warnschwelle unterschritten\n{d.strftime('%Y-%m-%d')}\n"
-                       f"{achs}" if achs else
-                       f"Warnschwelle unterschritten\n{d.strftime('%Y-%m-%d')}")
-                self._markers.append((d, i, hit_radius_days, 0.35, tip))
-            for d, achs in grenze:
-                if d is None or not (now <= d <= horizon_end):
-                    continue
-                ax.scatter([d], [i], marker="D",
-                           color=AMPEL_COLORS[StatusAmpel.RED],
-                           s=70, zorder=5, edgecolor="#FFFFFF", linewidths=1)
-                tip = (f"Grenzwert unterschritten\n{d.strftime('%Y-%m-%d')}\n"
-                       f"{achs}" if achs else
-                       f"Grenzwert unterschritten\n{d.strftime('%Y-%m-%d')}")
-                self._markers.append((d, i, hit_radius_days, 0.35, tip))
+            for (title, style), termine in zip(self._MARKER_STYLES, (reprofs, warns, grenze)):
+                for d, achs in termine:
+                    if d is None or not (now <= d <= horizon_end):
+                        continue
+                    ax.scatter([d], [i], edgecolor="#FFFFFF", linewidths=1, **style)
+                    tip = f"{title}\n{d.strftime('%Y-%m-%d')}" + (f"\n{achs}" if achs else "")
+                    self._markers.append((d, i, hit_radius_days, 0.35, tip))
             # Platzhaltertext fuer Zeilen ohne Prognose
             if note:
                 ax.text(now, i, " " + note, color="#8A8F99", fontsize=8,
                         style="italic", va="center", ha="left", zorder=6)
 
-        ax.axvline(now, color="#378ADD", linestyle="--", linewidth=1, alpha=0.7)
-        ax.text(now, -0.6, " heute", color="#378ADD", fontsize=8, va="bottom")
-
-        # X-Achse: Monatsraster. Zweizeiliges Label: oben der Monat, bei
-        # Januar und am linken Rand zusaetzlich das Jahr darunter — so ist
-        # auf einen Blick klar, in welchem Kalenderjahr der Marker liegt.
+    def _format_time_axis(self):
+        """X-Achse: Monatsraster. Zweizeiliges Label: oben der Monat, bei
+        Januar und am linken Rand zusaetzlich das Jahr darunter — so ist auf
+        einen Blick klar, in welchem Kalenderjahr der Marker liegt."""
+        ax = self._ax
         ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
-        import matplotlib.ticker as mticker
-        def _month_year_fmt(x, pos):
+
+        def month_year(x, pos):
             d = mdates.num2date(x)
-            # pos == 0 ist das linke-Rand-Tick; Januar bringt den
-            # Jahreswechsel ins Bild.
+            # pos == 0 ist das linke-Rand-Tick; Januar bringt den Jahreswechsel ins Bild.
             if pos == 0 or d.month == 1:
                 return f"{d.strftime('%b')}\n{d.year}"
             return d.strftime("%b")
-        ax.xaxis.set_major_formatter(mticker.FuncFormatter(_month_year_fmt))
+
+        ax.xaxis.set_major_formatter(mticker.FuncFormatter(month_year))
         ax.tick_params(colors="#6B6F78", labelsize=9)
         for spine in ("top", "right", "left"):
             ax.spines[spine].set_visible(False)
         ax.spines["bottom"].set_color("#D4D6DC")
         ax.grid(False)
-        self.draw_idle()
-        # Slider-Range an das spaeteste Grenzdatum anpassen
-        pane = getattr(self, "_pane", None)
-        if pane is not None:
-            pane.refresh_slider()
 
     def _on_mouse_move(self, event):
         """Zeigt QToolTip, wenn der Cursor nahe an einem Marker ist."""

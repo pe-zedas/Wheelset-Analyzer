@@ -5,7 +5,7 @@ from datetime import datetime
 import pytest
 
 from wheelset_dashboard.data.models import Side, StatusAmpel
-from wheelset_dashboard.data.oracle_source import _parse_flotte_rows
+from wheelset_dashboard.data.oracle_source import parse_flotte_rows
 from wheelset_dashboard.data.profile import load_profile_by_name
 from wheelset_dashboard.logic.status import classify_messreihe
 
@@ -34,7 +34,7 @@ def row(zartbez, stand, *, te=(1, "T1"), dg=None, rs=None, ausbau=None, aktuell=
 
 
 def load(*rows):
-    return _parse_flotte_rows(list(rows), HEADER, ABELLIO)
+    return parse_flotte_rows(list(rows), HEADER, ABELLIO)
 
 
 # ---------- Namensvarianten ----------

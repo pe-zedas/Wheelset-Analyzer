@@ -5,15 +5,13 @@ import csv
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from ..data.models import (
-    Achse, ComponentState, Drehgestell, Einheit, Flotte, Rad, StatusAmpel,
-)
+from ..data.models import Flotte, StatusAmpel
 from ..data.profile import Profile
 
 log = logging.getLogger(__name__)
@@ -159,7 +157,6 @@ def export_raw_csv(flotte: Flotte, profile: Profile, out_path: Path) -> int:
     out_path = Path(out_path)
     # Reverse-Mapping: intern -> CSV-Spalte in Profil-Reihenfolge
     csv_cols = list(profile.columns_raw.keys())
-    inverse = {v: k for k, v in profile.columns_raw.items()}
 
     with open(out_path, "w", encoding=profile.encoding, newline="") as fh:
         w = csv.writer(fh, delimiter=profile.delimiter)

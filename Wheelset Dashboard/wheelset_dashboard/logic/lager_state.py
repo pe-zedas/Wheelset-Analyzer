@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from ..data.models import ComponentState, Flotte, LagerKomponente, Messreihe
+from ..data.models import ComponentState, Flotte, LagerKomponente
 
 
 @dataclass

@@ -4,9 +4,9 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from wheelset_dashboard.data.csv_source import NO_RS_LABEL
+from wheelset_dashboard.data.structure import NO_RS_LABEL
 from wheelset_dashboard.data.models import Side, StatusAmpel
-from wheelset_dashboard.data.oracle_source import _parse_flotte_rows
+from wheelset_dashboard.data.oracle_source import parse_flotte_rows
 from wheelset_dashboard.data.profile import load_profile_by_name
 from wheelset_dashboard.logic.status import classify_messreihe
 from wheelset_dashboard.logic.aggregation import n_real_achsen, n_real_dg
@@ -29,7 +29,7 @@ def row(zartbez, stand, *, te=(397748, "273"), dg=DG, ausbau=None, aktuell=1, mi
 
 
 def load(*rows):
-    return _parse_flotte_rows(list(rows), HEADER, MOB)
+    return parse_flotte_rows(list(rows), HEADER, MOB)
 
 
 # Bezeichnungen exakt wie in der MOB-Datenbank (teils mit Leerzeichen am Ende)

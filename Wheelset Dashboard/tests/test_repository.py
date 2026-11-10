@@ -51,15 +51,24 @@ def test_oracle_mit_connect_string_nutzt_eine_gemeinsame_session(monkeypatch):
     assert gesehen == {"cs": "u/p@dsn", "profile": "abellio"}
 
 
-def test_oracle_ohne_connect_string_nutzt_einzelangaben(monkeypatch):
+def test_oracle_einzelangaben_ergeben_denselben_ladeweg(monkeypatch):
+    # Einstellungsdialog liefert DSN/Nutzer/Passwort einzeln -> daraus wird der Connect-String
     gesehen = {}
 
-    def fake(dsn, user, password, profile, thick_mode_lib_dir=None):
-        gesehen.update(dsn=dsn, user=user, password=password, profile=profile.name)
+    def fake(connect_string, profile, thick_mode_lib_dir=None):
+        gesehen.update(cs=connect_string, profile=profile.name)
         return Flotte()
 
-    monkeypatch.setattr(oracle_source, "load_flotte_from_oracle", fake)
+    monkeypatch.setattr(oracle_source, "load_flotte_and_prognose_from_connect_string", fake)
     repo = Repository(RepositoryConfig(profile_name="mob", source="oracle",
                                        oracle_dsn="pcs16", oracle_user="mob", oracle_password="x"))
     repo.load()
-    assert gesehen == {"dsn": "pcs16", "user": "mob", "password": "x", "profile": "mob"}
+    assert gesehen == {"cs": "mob/x@pcs16", "profile": "mob"}
+
+
+@pytest.mark.parametrize("user, pw, dsn", [("", "x", "pcs16"), ("mob", "", "pcs16"), ("mob", "x", "")])
+def test_oracle_mit_unvollstaendigen_angaben_ist_ein_fehler(user, pw, dsn):
+    repo = Repository(RepositoryConfig(profile_name="mob", source="oracle",
+                                       oracle_dsn=dsn, oracle_user=user, oracle_password=pw))
+    with pytest.raises(ValueError, match="Zugangsdaten"):
+        repo.load()

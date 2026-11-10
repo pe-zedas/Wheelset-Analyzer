@@ -1,4 +1,4 @@
-"""End-to-End-Test gegen die Oracle-DB.
+"""End-to-End-Test gegen die Oracle-DB (Aufruf: ``python -m tools.oracle_e2e --profile vgf``).
 
 Liest den Connect-String aus (in dieser Reihenfolge):
   1. ``--connect-file <pfad>``
@@ -8,7 +8,7 @@ Liest den Connect-String aus (in dieser Reihenfolge):
 
 Fuehrt der Reihe nach aus:
   * DB-Verbindung testen
-  * BO_RADSATZDATEN laden (optional per --limit begrenzt)
+  * BO_RADSATZDATEN und Prognose laden (Rohdaten optional per --limit begrenzt)
   * Status- und Lager-Logik anwenden
   * Zusammenfassung drucken
 
@@ -22,14 +22,14 @@ import os
 import sys
 from pathlib import Path
 
-from .config.app_paths import ORACLE_CONNECT_FILE, read_oracle_connect_string
-from .config.logging_setup import setup_logging
-from .data.oracle_source import (
-    OracleConnectionError, load_flotte_from_connect_string, test_connection,
+from wheelset_dashboard.config.app_paths import ORACLE_CONNECT_FILE, read_oracle_connect_string
+from wheelset_dashboard.config.logging_setup import setup_logging
+from wheelset_dashboard.data.oracle_source import (
+    OracleConnectionError, load_flotte_and_prognose_from_connect_string, test_connection,
 )
-from .data.profile import load_profile_by_name
-from .logic.lager_state import recompute_all as recompute_lager
-from .logic.status import recompute_all as recompute_status
+from wheelset_dashboard.data.profile import load_profile_by_name
+from wheelset_dashboard.logic.lager_state import recompute_all as recompute_lager
+from wheelset_dashboard.logic.status import recompute_all as recompute_status
 
 
 DEFAULT_CONNECT_FILE = ORACLE_CONNECT_FILE
@@ -85,7 +85,7 @@ def main():
     print(f"2) Lade Daten (Profil: {args.profile}" + (f", Limit {args.limit}" if args.limit else "") + ")...")
     profile = load_profile_by_name(args.profile)
     try:
-        flotte = load_flotte_from_connect_string(
+        flotte = load_flotte_and_prognose_from_connect_string(
             conn_str, profile,
             thick_mode_lib_dir=args.thick_lib_dir, limit=args.limit,
         )

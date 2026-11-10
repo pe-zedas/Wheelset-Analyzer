@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 from typing import Any, Callable
 
 from PySide6.QtCore import QObject, Signal
+
+from ..perf import Timer
 
 log = logging.getLogger(__name__)
 
@@ -47,14 +48,14 @@ class BackgroundJob(QObject):
         return self._thread.is_alive()
 
     def _run(self) -> None:
-        t0 = time.monotonic()
+        timer = Timer()
         try:
             result = self._fn()
         except Exception as exc:  # noqa: BLE001 - jede Ursache soll im GUI landen
-            self.seconds = time.monotonic() - t0
+            self.seconds = timer.stop()
             log.exception("Hintergrundaufgabe '%s' fehlgeschlagen", self._name)
             self.failed.emit(str(exc) or exc.__class__.__name__)
             return
-        self.seconds = time.monotonic() - t0
+        self.seconds = timer.stop()
         log.debug("Hintergrundaufgabe '%s' fertig nach %.2fs", self._name, self.seconds)
         self.done.emit(result)

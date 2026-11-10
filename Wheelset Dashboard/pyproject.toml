@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wheelset-dashboard"
+version = "1.1.0"
+description = "Desktop-Dashboard zur Visualisierung der Radsatzdaten (zedas asset)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6>=6.6",
+    "matplotlib>=3.8",
+    "numpy>=1.26",
+    "oracledb>=2.0",
+    "PyYAML>=6.0",
+    "openpyxl>=3.1",
+    "qtawesome>=1.3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyflakes>=3"]
+
+[project.scripts]
+wheelset-dashboard = "wheelset_dashboard.main:main"
+
+# Die Betriebs-Konfiguration (config/, DB-Zugangsdaten) liegt NEBEN dem Paket
+# im Projektordner. Installation daher als Entwicklungsinstallation
+# (pip install -e .), nicht als Wheel in site-packages.
+[tool.setuptools.packages.find]
+include = ["wheelset_dashboard*"]
+
+[tool.setuptools.package-data]
+wheelset_dashboard = ["config/profiles/*.yaml", "ui/style.qss", "ui/assets/*"]

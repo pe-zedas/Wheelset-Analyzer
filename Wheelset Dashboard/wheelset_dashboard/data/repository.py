@@ -1,13 +1,18 @@
 """Repository-Fassade: einheitlicher Zugriff auf Flotten-Daten (CSV oder Oracle)."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from ..config.app_paths import build_connect_string
+from ..perf import timed
 from .csv_source import load_prognose_csv, load_raw_csv
 from .models import Flotte
 from .profile import Profile, load_profile_by_name
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -16,11 +21,18 @@ class RepositoryConfig:
     source: str                        # "csv" | "oracle"
     csv_raw_path: Optional[Path] = None
     csv_prognose_path: Optional[Path] = None
+    # Oracle: entweder fertiger Connect-String (user/pw@dsn) oder die Einzelangaben,
+    # aus denen er gebaut wird (Einstellungsdialog).
     oracle_dsn: Optional[str] = None
     oracle_user: Optional[str] = None
     oracle_password: Optional[str] = None
-    oracle_connect_string: Optional[str] = None  # Backend-Format user/pw@dsn
+    oracle_connect_string: Optional[str] = None
     oracle_thick_lib_dir: Optional[str] = None
+
+    def connect_string(self) -> Optional[str]:
+        """Connect-String fuer Oracle (``None``, wenn Angaben fehlen)."""
+        return self.oracle_connect_string or build_connect_string(
+            self.oracle_user or "", self.oracle_password or "", self.oracle_dsn or "")
 
 
 class Repository:
@@ -30,46 +42,28 @@ class Repository:
         self._flotte: Optional[Flotte] = None
 
     def load(self) -> Flotte:
-        if self.config.source == "csv":
-            if not self.config.csv_raw_path:
+        cfg = self.config
+        if cfg.source == "csv":
+            if not cfg.csv_raw_path:
                 raise ValueError("csv_raw_path fehlt")
-            flotte = load_raw_csv(Path(self.config.csv_raw_path), self.profile)
-            if self.config.csv_prognose_path:
-                load_prognose_csv(Path(self.config.csv_prognose_path), self.profile, flotte)
-            self._flotte = flotte
-            return flotte
-        elif self.config.source == "oracle":
-            import logging as _logging, time as _time
-            _rl = _logging.getLogger(__name__)
-            if self.config.oracle_connect_string:
-                # Eine Oracle-Session fuer beide Queries → spart den
-                # zweiten Connect-Handshake (typisch 1–3 s). Fehler beim
-                # Lesen der Prognose-Tabelle werden darin schon geloggt
-                # und blockieren die Rohdaten nicht.
-                _ti0 = _time.monotonic()
-                from .oracle_source import (
-                    load_flotte_and_prognose_from_connect_string,
-                )
-                _ti1 = _time.monotonic()
-                _rl.debug("repo: import oracle_source (inkl. oracledb)=%.2fs", _ti1 - _ti0)
-                flotte = load_flotte_and_prognose_from_connect_string(
-                    self.config.oracle_connect_string,
-                    profile=self.profile,
-                    thick_mode_lib_dir=self.config.oracle_thick_lib_dir,
-                )
-            else:
-                from .oracle_source import load_flotte_from_oracle
-                flotte = load_flotte_from_oracle(
-                    dsn=self.config.oracle_dsn,
-                    user=self.config.oracle_user,
-                    password=self.config.oracle_password,
-                    profile=self.profile,
-                    thick_mode_lib_dir=self.config.oracle_thick_lib_dir,
-                )
-            self._flotte = flotte
-            return flotte
+            flotte = load_raw_csv(Path(cfg.csv_raw_path), self.profile)
+            if cfg.csv_prognose_path:
+                load_prognose_csv(Path(cfg.csv_prognose_path), self.profile, flotte)
+        elif cfg.source == "oracle":
+            connect = cfg.connect_string()
+            if not connect:
+                raise ValueError("Oracle: Zugangsdaten unvollständig "
+                                 "(Benutzer, Passwort und DSN bzw. Connect-String)")
+            # Eine Oracle-Verbindung je Abfrage, beide parallel (Rohdaten + Prognose).
+            # Fehler beim Lesen der Prognose-Tabelle blockieren die Rohdaten nicht.
+            with timed("repo: import oracle_source (inkl. oracledb)", log):
+                from .oracle_source import load_flotte_and_prognose_from_connect_string
+            flotte = load_flotte_and_prognose_from_connect_string(
+                connect, profile=self.profile, thick_mode_lib_dir=cfg.oracle_thick_lib_dir)
         else:
-            raise ValueError(f"Unbekannte Quelle: {self.config.source}")
+            raise ValueError(f"Unbekannte Quelle: {cfg.source}")
+        self._flotte = flotte
+        return flotte
 
     @property
     def flotte(self) -> Flotte:

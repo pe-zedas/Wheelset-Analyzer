@@ -1,8 +1,7 @@
 """Matplotlib-Canvas (Qt-eingebettet) fuer das Dashboard."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import matplotlib
 matplotlib.use("QtAgg")
@@ -11,9 +10,10 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from matplotlib.ticker import FuncFormatter
 
-from ..data.csv_source import NO_RS_LABEL
 
 from PySide6.QtWidgets import QVBoxLayout, QWidget
+
+from ..data.models import PrognosePunkt
 
 
 # Farbkonventionen (aus PRD F-UI-2):
@@ -98,6 +98,75 @@ def _find_crossing(points, y_val, x_mode, get_x, get_y):
     return None
 
 
+def _trim_staircase(punkte, min_v):
+    """Schneidet die Prognose-Treppe am ersten absteigenden Erreichen von ``min_v`` ab.
+
+    Das Backend liefert die Treppe bis MIN (``_simulate_with_reprofilings`` in
+    prognosis_new_core.py); das Trimmen dient nur als Sicherheitsnetz fuer evtl.
+    alte Prognose-Zeilen, die noch ueber MIN hinauslaufen.
+    """
+    if not punkte or min_v is None:
+        return punkte
+    trimmed: List[PrognosePunkt] = []
+    for p in punkte:
+        if not trimmed:
+            trimmed.append(p)
+            continue
+        prev = trimmed[-1]
+        if prev.stand >= min_v and p.stand < min_v:
+            if prev.datum == p.datum:
+                trimmed.append(PrognosePunkt(datum=p.datum, stand=min_v,
+                                             laufleistung=p.laufleistung))
+            else:
+                frac = (prev.stand - min_v) / (prev.stand - p.stand)
+                new_datum = prev.datum + (p.datum - prev.datum) * frac
+                new_lauf = None
+                if prev.laufleistung is not None and p.laufleistung is not None:
+                    new_lauf = prev.laufleistung + (p.laufleistung - prev.laufleistung) * frac
+                trimmed.append(PrognosePunkt(datum=new_datum, stand=min_v,
+                                             laufleistung=new_lauf))
+            break
+        trimmed.append(p)
+    return trimmed
+
+
+def _endpoint_polyline(letzt, prog, x_mode) -> List[Tuple[float, float]]:
+    """Fallback-Linie letzter Messwert → Warn → Grenz aus den Prognose-Endpunkten."""
+    y_warn, y_grenz = letzt.gelb_min, letzt.min_val
+    if x_mode == "datum":
+        x_start = letzt.datum
+        ends = ((prog.datum_warnwert, y_warn), (prog.datum_grenzwert, y_grenz))
+    elif x_mode == "km" and letzt.laufleistung is not None:
+        x_start = letzt.laufleistung
+        ends = ((prog.km_warnwert, y_warn), (prog.km_grenzwert, y_grenz))
+    else:
+        return []
+    pts = [(x_start, letzt.stand)]
+    for x_end, y_end in ends:
+        if x_end is not None and y_end is not None and x_end > x_start:
+            pts.append((x_end, y_end))
+    return pts
+
+
+def _crossing_x(punkte, historie, y_val, x_mode, fallback):
+    """X-Wert, an dem die Prognose-Treppe ``y_val`` absteigend erreicht.
+
+    - Reprof-Spruenge (gleiches X, Y springt nach unten) werden beruecksichtigt;
+      ein Punkt GENAU auf ``y_val`` (z.B. letzter Punkt nach Trim bei MIN) zaehlt.
+    - Fallback 1: Kreuzpunkt in der HISTORIE (typisch bei Lagerkomponenten, deren
+      Treppe schon unter der Schwelle startet).
+    - Fallback 2: ``fallback`` (Wert aus der Prognose-Tabelle).
+    """
+    if x_mode == "datum":
+        get_p, get_h = (lambda p: p.datum), (lambda mp: mp.datum)
+    else:
+        get_p, get_h = (lambda p: p.laufleistung), (lambda mp: mp.laufleistung)
+    x = _find_crossing(punkte, y_val, x_mode, get_x=get_p, get_y=lambda p: p.stand)
+    if x is None:
+        x = _find_crossing(historie, y_val, x_mode, get_x=get_h, get_y=lambda mp: mp.stand) or fallback
+    return x
+
+
 class PlotCanvas(FigureCanvasQTAgg):
     def __init__(self, parent=None):
         fig = Figure(figsize=(8, 4), tight_layout=True, facecolor="#FFFFFF")
@@ -133,21 +202,42 @@ class PlotCanvas(FigureCanvasQTAgg):
         flotte=None,                  # Flotte fuer Fleet-Fallback der Prognose-Parameter
         achse=None,                   # Achse fuer gemeinsames Reprof-Intervall beider Raeder
     ):
-        """Zeichnet eine oder mehrere Messreihen (Rad links/rechts) mit optionaler Prognose."""
+        """Zeichnet eine oder mehrere Messreihen (Rad links/rechts) mit optionaler Prognose.
+
+        Reihenfolge (bestimmt Legende und Ueberlagerung): Messwerte, Prognose samt
+        Markern, Grenzlinien, Heute-Linie, Achsenformat, Legende.
+        """
         self.clear()
-        ax = self._ax
 
         # Sammel-Achse ("Radsatz-Zuordnung fehlt"): Werte mehrerer Raeder
         # stehen unter einem Zaehler. Eine Linie dazwischen wuerde einen Trend
         # vortaeuschen -> nur Punkte zeichnen.
-        pooled = achse is not None and getattr(achse, "rs_einbaupos", None) == NO_RS_LABEL
+        pooled = achse is not None and getattr(achse, "kind", None) == "sammel"
 
-        plotted = False          # wurde mindestens eine Reihe gezeichnet?
-        all_min = []
-        all_max = []
-        all_gelb_min = []
-        all_gelb_max = []
+        plotted, limits = self._draw_series(reihen, x_mode, pooled)
+        prognose_drawn = self._draw_prognosen(reihen, x_mode)
+        self._draw_thresholds(limits)
+        if today is not None and x_mode == "datum":
+            self._draw_today(today)
 
+        # Prognose-Parameter-Info und "Keine Prognose vorhanden"-Hinweis
+        # werden NICHT im Plot gezeichnet, sondern von der View als
+        # Kacheln unter dem Diagramm platziert (siehe self._prognose_info
+        # und self._prognose_available).
+        self._prognose_available = bool(self._prognose_info) or prognose_drawn
+
+        self._format_axes(x_mode, y_label)
+        self._draw_legend_or_hint(plotted, reihen, x_mode)
+        self.draw_idle()
+
+    # ---- Messwerte ----------------------------------------------------
+
+    def _draw_series(self, reihen, x_mode, pooled):
+        """Zeichnet die Messwerte je Rad und sammelt die Schwellen aus den
+        Messpunkten. Rueckgabe: ``(wurde_gezeichnet, schwellen)``."""
+        ax = self._ax
+        plotted = False
+        limits = {"min": [], "max": [], "gelb_min": [], "gelb_max": []}
         for side, mr, _ in reihen:
             if not mr.historie:
                 continue
@@ -169,221 +259,126 @@ class PlotCanvas(FigureCanvasQTAgg):
                     linestyle="none" if pooled else "-",
                     zorder=3, label=SIDE_LABEL.get(side, side))
             plotted = True
-            # Schwellen sammeln
             for mp in mr.historie:
-                if mp.min_val is not None: all_min.append(mp.min_val)
-                if mp.max_val is not None: all_max.append(mp.max_val)
-                if mp.gelb_min is not None: all_gelb_min.append(mp.gelb_min)
-                if mp.gelb_max is not None: all_gelb_max.append(mp.gelb_max)
+                if mp.min_val is not None:
+                    limits["min"].append(mp.min_val)
+                if mp.max_val is not None:
+                    limits["max"].append(mp.max_val)
+                if mp.gelb_min is not None:
+                    limits["gelb_min"].append(mp.gelb_min)
+                if mp.gelb_max is not None:
+                    limits["gelb_max"].append(mp.gelb_max)
+        return plotted, limits
 
-        # Prognose-Visualisierung: ausschliesslich aus mr.prognose.
-        # Die Prognose-Tabelle liefert die komplette Treppenkurve pro Rad
-        # (prog.punkte = Liste von PrognosePunkt(datum, stand, laufleistung)).
-        # Reprofilierungssprünge sind in der Liste als zwei Punkte am
-        # selben Datum enthalten (erst "vor-Reprof", dann "nach-Reprof"),
-        # ein verbundener Linienzug erzeugt dadurch automatisch den
-        # senkrechten Sprung nach unten.
-        #
-        # Als Fallback — wenn die Treppen-Punkte fehlen (z.B. nach einem
-        # Oracle-Lauf mit nur Endpunkten) — wird die klassische 3-Punkt-
-        # Linie (letzter Messwert → Warn → Grenz) gezeichnet.
-        #
-        # Prognose-Darstellung ist nur fuer LKD definiert; fuer alle anderen
-        # Messgroessen (Sd, Sh, Spur, Stichmass …) gibt es keine Prognose
-        # in der Tabelle.
+    # ---- Prognose -----------------------------------------------------
+
+    def _draw_prognosen(self, reihen, x_mode) -> bool:
+        """Prognose-Visualisierung: ausschliesslich aus ``mr.prognose``.
+
+        Prognose-Darstellung ist nur fuer LKD definiert; fuer alle anderen
+        Messgroessen (Sd, Sh, Spur, Stichmass ...) gibt es keine Prognose in
+        der Tabelle. Fuellt ``self._prognose_info`` (Infotext-Daten je Rad:
+        ``(label, prognose)``) und gibt zurueck, ob eine Prognose gezeichnet wurde.
+        """
+        self._prognose_info = []
         messgroesse = next((mr.messgroesse for _, mr, _ in reihen if mr), None)
-        prognose_supported = (messgroesse == "LKD")
-        prognose_drawn = False
-        self._prognose_info = []   # Infotext-Daten je Rad: (label, prognose)
-
+        if messgroesse != "LKD":
+            return False
+        drawn = False
         for side, mr, prog in reihen:
-            if not prognose_supported:
-                break
             if prog is None or not mr.historie:
                 continue
-            letzt = max(mr.historie, key=lambda mp: mp.datum)
-            col = SIDE_COLORS.get(side, COL_UNSPEC)
-
-            punkte = list(getattr(prog, "punkte", []) or [])
-
-            # Treppe am ersten absteigenden Erreichen von MIN abschneiden.
-            # Das Backend liefert die Treppe bis MIN (siehe
-            # ``_simulate_with_reprofilings`` in prognosis_new_core.py);
-            # das Trimmen hier dient nur als Sicherheitsnetz fuer evtl.
-            # alte Prognose-Zeilen, die noch ueber MIN hinauslaufen.
-            if punkte and letzt.min_val is not None:
-                from ..data.models import PrognosePunkt as _PP
-                trimmed: List[_PP] = []
-                min_v = letzt.min_val
-                for i, p in enumerate(punkte):
-                    if not trimmed:
-                        trimmed.append(p)
-                        continue
-                    prev = trimmed[-1]
-                    if prev.stand >= min_v and p.stand < min_v:
-                        if prev.datum == p.datum:
-                            trimmed.append(_PP(datum=p.datum, stand=min_v,
-                                                laufleistung=p.laufleistung))
-                        else:
-                            frac = (prev.stand - min_v) / (prev.stand - p.stand)
-                            new_datum = prev.datum + (p.datum - prev.datum) * frac
-                            new_lauf = None
-                            if prev.laufleistung is not None and p.laufleistung is not None:
-                                new_lauf = prev.laufleistung + (p.laufleistung - prev.laufleistung) * frac
-                            trimmed.append(_PP(datum=new_datum, stand=min_v, laufleistung=new_lauf))
-                        break
-                    trimmed.append(p)
-                punkte = trimmed
-
-            # Linie bauen. Primaerer Weg: die aus der Prognose-Tabelle
-            # geladene Treppe. Beginnend bei dem Punkt, der direkt vor dem
-            # letzten echten Messwert liegt — so laeuft die Treppe nahtlos
-            # aus der Historie heraus.
-            if punkte:
-                if x_mode == "km":
-                    xs_vals = [p.laufleistung for p in punkte]
-                    if any(v is None for v in xs_vals):
-                        xs_vals = None
-                    else:
-                        ys_vals = [p.stand for p in punkte]
-                else:   # datum
-                    xs_vals = [p.datum for p in punkte]
-                    ys_vals = [p.stand for p in punkte]
-                if xs_vals is not None:
-                    ax.plot(xs_vals, ys_vals, color=col, linestyle="--",
-                            linewidth=1.3, marker="", zorder=2,
-                            label=f"Prognose {SIDE_LABEL.get(side, side).lower()}")
-                    prognose_drawn = True
-            else:
-                # Fallback: 3-Punkt-Linie aus Endpunkten.
-                y_warn = letzt.gelb_min
-                y_grenz = letzt.min_val
-                if x_mode == "datum":
-                    x_start, y_start = letzt.datum, letzt.stand
-                    dw, dg = prog.datum_warnwert, prog.datum_grenzwert
-                    pts: List[Tuple[datetime, float]] = [(x_start, y_start)]
-                    if dw is not None and y_warn is not None and dw > x_start:
-                        pts.append((dw, y_warn))
-                    if dg is not None and y_grenz is not None and dg > x_start:
-                        pts.append((dg, y_grenz))
-                elif x_mode == "km" and letzt.laufleistung is not None:
-                    x_start, y_start = letzt.laufleistung, letzt.stand
-                    kw, kg = prog.km_warnwert, prog.km_grenzwert
-                    pts = [(x_start, y_start)]
-                    if kw is not None and y_warn is not None and kw > x_start:
-                        pts.append((kw, y_warn))
-                    if kg is not None and y_grenz is not None and kg > x_start:
-                        pts.append((kg, y_grenz))
-                else:
-                    pts = []
-                if len(pts) >= 2:
-                    ax.plot([p[0] for p in pts], [p[1] for p in pts],
-                            color=col, linestyle="--", linewidth=1.3,
-                            marker="", zorder=2,
-                            label=f"Prognose {SIDE_LABEL.get(side, side).lower()}")
-                    prognose_drawn = True
-
-            # Marker an den Prognose-Endpunkten (Warn: Kreis, Grenz: Raute).
-            # Sie werden auf der PROGNOSE-TREPPE platziert — an der Stelle,
-            # wo die Treppe den Warn- bzw. Grenz-Y-Wert (gelb_min bzw.
-            # min_val) absteigend kreuzt. So sitzt der Marker immer auf
-            # der Linie, auch bei ruhenden Raedern (Treppe ab letztem
-            # Messwert; prog.datum_warnwert/grenzwert liegen dagegen in
-            # der Zukunft und werden daher NICHT fuer den Marker benutzt).
-            # Fallback auf die Tabellenwerte, wenn keine Treppe vorhanden
-            # ist (3-Punkt-Linie).
-            def _x_at_y(y_val):
-                """Findet den X-Wert, an dem die Treppe erstmals absteigend
-                den Y-Wert ``y_val`` erreicht bzw. unterschreitet.
-
-                - Reprof-Spruenge (gleiches X, Y springt nach unten) werden
-                  uebersprungen; stattdessen wird der Punkt NACH dem Sprung
-                  bewertet.
-                - Ein Punkt der Treppe, der GENAU auf ``y_val`` liegt (z.B.
-                  letzter Punkt nach Trim bei MIN), zaehlt als Erreichen.
-                - Falls die Treppe erst innerhalb eines Reprof-Sprungs
-                  (vertikal) durch y_val geht, wird das X des Sprungs
-                  zurueckgegeben.
-                """
-                return _find_crossing(punkte, y_val, x_mode,
-                                        get_x=(lambda p: p.datum) if x_mode == "datum"
-                                              else (lambda p: p.laufleistung),
-                                        get_y=lambda p: p.stand)
-
-            def _x_at_y_history(y_val):
-                """Fallback: Kreuzpunkt in der HISTORIE suchen (nur wenn
-                die Prognose-Treppe keinen liefert — typisch bei
-                Lagerkomponenten, deren Prognose-Treppe schon unter der
-                Schwelle startet, die aber in der Historie durch die
-                Schwelle gelaufen sind)."""
-                return _find_crossing(mr.historie, y_val, x_mode,
-                                        get_x=(lambda mp: mp.datum) if x_mode == "datum"
-                                              else (lambda mp: mp.laufleistung),
-                                        get_y=lambda mp: mp.stand)
-
-            def _marker(x_val, y_val, m_col, m_marker):
-                if x_val is None or y_val is None:
-                    return
-                ax.plot([x_val], [y_val], marker=m_marker, markersize=8,
-                        markerfacecolor=col, markeredgecolor=m_col,
-                        markeredgewidth=1.5, zorder=4, linestyle="")
-            # Y-Werte der Marker = Schwellen aus dem letzten Messpunkt
-            y_warn = letzt.gelb_min
-            y_grenz = letzt.min_val
-            # Erst in der Prognose-Treppe suchen; falls dort nichts (z.B.
-            # Lagerkomponente mit Treppe die schon unter Schwelle startet),
-            # in der Historie suchen; letzter Fallback: Prognose-Tabellen-km.
-            if x_mode == "datum":
-                x_warn = _x_at_y(y_warn)
-                if x_warn is None:
-                    x_warn = _x_at_y_history(y_warn) or prog.datum_warnwert
-                x_grenz = _x_at_y(y_grenz)
-                if x_grenz is None:
-                    x_grenz = _x_at_y_history(y_grenz) or prog.datum_grenzwert
-            else:
-                x_warn = _x_at_y(y_warn)
-                if x_warn is None:
-                    x_warn = _x_at_y_history(y_warn) or prog.km_warnwert
-                x_grenz = _x_at_y(y_grenz)
-                if x_grenz is None:
-                    x_grenz = _x_at_y_history(y_grenz) or prog.km_grenzwert
-            _marker(x_warn, y_warn, COL_WARN, "o")
-            _marker(x_grenz, y_grenz, COL_GRENZ, "D")
-
-            if prognose_drawn:
+            drawn |= self._draw_prognose_row(side, mr, prog, x_mode)
+            if drawn:
                 self._prognose_info.append((SIDE_LABEL.get(side, side), prog))
+        return drawn
 
-        # Horizontale Schwellen — alle vier Werte zeichnen, soweit die CSV
-        # sie liefert. Die ``direction`` steuert nur die Status-Berechnung,
-        # nicht die Darstellung. Gezeigte Werte muessen aber einen gueltigen
-        # Zwischenbereich bilden (schuetzt vor inkonsistenten CSV-Werten
-        # wie GELB_MAX = MIN).
+    def _draw_prognose_row(self, side, mr, prog, x_mode) -> bool:
+        """Prognose-Linie und Warn-/Grenz-Marker eines Rades. ``True``, wenn die
+        Linie gezeichnet wurde.
+
+        Die Prognose-Tabelle liefert die komplette Treppenkurve pro Rad
+        (``prog.punkte``). Reprofilierungssprünge sind als zwei Punkte am selben
+        Datum enthalten (erst "vor", dann "nach"), ein verbundener Linienzug
+        erzeugt dadurch den senkrechten Sprung nach unten. Fehlen die
+        Treppen-Punkte (z.B. nach einem Oracle-Lauf mit nur Endpunkten), wird die
+        3-Punkt-Linie (letzter Messwert → Warn → Grenz) gezeichnet.
+        """
+        ax = self._ax
+        letzt = max(mr.historie, key=lambda mp: mp.datum)
+        col = SIDE_COLORS.get(side, COL_UNSPEC)
+        label = f"Prognose {SIDE_LABEL.get(side, side).lower()}"
+        punkte = _trim_staircase(list(getattr(prog, "punkte", []) or []), letzt.min_val)
+
+        drawn = False
+        if punkte:
+            if x_mode == "km":
+                xs_vals = [p.laufleistung for p in punkte]
+                ys_vals = [p.stand for p in punkte]
+                if any(v is None for v in xs_vals):
+                    xs_vals = None
+            else:
+                xs_vals = [p.datum for p in punkte]
+                ys_vals = [p.stand for p in punkte]
+            if xs_vals is not None:
+                ax.plot(xs_vals, ys_vals, color=col, linestyle="--", linewidth=1.3,
+                        marker="", zorder=2, label=label)
+                drawn = True
+        else:
+            pts = _endpoint_polyline(letzt, prog, x_mode)
+            if len(pts) >= 2:
+                ax.plot([p[0] for p in pts], [p[1] for p in pts], color=col,
+                        linestyle="--", linewidth=1.3, marker="", zorder=2, label=label)
+                drawn = True
+
+        # Marker an den Prognose-Endpunkten (Warn: Kreis, Grenz: Raute) auf der
+        # PROGNOSE-TREPPE, wo sie den Warn- bzw. Grenz-Y-Wert (gelb_min bzw.
+        # min_val) absteigend kreuzt. So sitzt der Marker immer auf der Linie,
+        # auch bei ruhenden Raedern. Fallbacks: Historie, dann Tabellenwerte.
+        km = x_mode != "datum"
+        y_warn, y_grenz = letzt.gelb_min, letzt.min_val
+        x_warn = _crossing_x(punkte, mr.historie, y_warn, x_mode,
+                             prog.km_warnwert if km else prog.datum_warnwert)
+        x_grenz = _crossing_x(punkte, mr.historie, y_grenz, x_mode,
+                              prog.km_grenzwert if km else prog.datum_grenzwert)
+        self._draw_marker(x_warn, y_warn, col, COL_WARN, "o")
+        self._draw_marker(x_grenz, y_grenz, col, COL_GRENZ, "D")
+        return drawn
+
+    def _draw_marker(self, x_val, y_val, face_col, edge_col, marker):
+        if x_val is None or y_val is None:
+            return
+        self._ax.plot([x_val], [y_val], marker=marker, markersize=8,
+                      markerfacecolor=face_col, markeredgecolor=edge_col,
+                      markeredgewidth=1.5, zorder=4, linestyle="")
+
+    # ---- Grenzlinien, Heute-Linie, Achsen -----------------------------
+
+    def _draw_thresholds(self, limits):
+        """Horizontale Schwellen — alle vier Werte zeichnen, soweit geliefert.
+
+        Die ``direction`` steuert nur die Status-Berechnung, nicht die Darstellung.
+        Gezeigte Werte muessen aber einen gueltigen Zwischenbereich bilden
+        (schuetzt vor inkonsistenten Werten wie GELB_MAX = MIN).
+        """
+        ax = self._ax
         drawn_values = []   # fuer Y-Achsen-Erweiterung
-        min_v = min(all_min) if all_min else None
-        max_v = max(all_max) if all_max else None
+        min_v = min(limits["min"]) if limits["min"] else None
+        max_v = max(limits["max"]) if limits["max"] else None
 
         if min_v is not None:
-            ax.axhline(min_v, color=COL_GRENZ, linestyle=":", linewidth=1.2,
-                       label=f"MIN {min_v:g}")
+            ax.axhline(min_v, color=COL_GRENZ, linestyle=":", linewidth=1.2, label=f"MIN {min_v:g}")
             drawn_values.append(min_v)
         if max_v is not None:
-            ax.axhline(max_v, color=COL_GRENZ, linestyle=":", linewidth=1.2,
-                       label=f"MAX {max_v:g}")
+            ax.axhline(max_v, color=COL_GRENZ, linestyle=":", linewidth=1.2, label=f"MAX {max_v:g}")
             drawn_values.append(max_v)
-        if all_gelb_min:
-            v = max(all_gelb_min)
-            # Warnlinie unten: muss echt zwischen MIN und MAX liegen
-            if (min_v is None or v > min_v) and (max_v is None or v < max_v):
-                ax.axhline(v, color=COL_WARN, linestyle=":", linewidth=1.2,
-                           label=f"GELB_MIN {v:g}")
-                drawn_values.append(v)
-        if all_gelb_max:
-            v = min(all_gelb_max)
-            # Warnlinie oben: muss echt zwischen MIN und MAX liegen
-            if (min_v is None or v > min_v) and (max_v is None or v < max_v):
-                ax.axhline(v, color=COL_WARN, linestyle=":", linewidth=1.2,
-                           label=f"GELB_MAX {v:g}")
-                drawn_values.append(v)
+        for key, pick, name in (("gelb_min", max, "GELB_MIN"), ("gelb_max", min, "GELB_MAX")):
+            if limits[key]:
+                v = pick(limits[key])
+                # Warnlinie: muss echt zwischen MIN und MAX liegen
+                if (min_v is None or v > min_v) and (max_v is None or v < max_v):
+                    ax.axhline(v, color=COL_WARN, linestyle=":", linewidth=1.2, label=f"{name} {v:g}")
+                    drawn_values.append(v)
 
         # Y-Achse so erweitern, dass alle gezeichneten Grenz-/Warnlinien sichtbar sind
         if drawn_values:
@@ -392,29 +387,21 @@ class PlotCanvas(FigureCanvasQTAgg):
             ax.set_ylim(min(ymin_cur, min(drawn_values) - pad),
                         max(ymax_cur, max(drawn_values) + pad))
 
-        # Heute-Linie — nur, wenn sie den Verlauf nicht zusammenstaucht.
-        # Bei historischen Daten (z.B. Abellio: Messungen enden Jahre vor
-        # heute) wuerde axvline() die Achse bis heute aufziehen und den
-        # eigentlichen Verlauf in eine Ecke druecken. Der Datenbereich
-        # (Historie + Prognose) ist hier bereits skaliert.
-        if today is not None and x_mode == "datum":
-            x_lo, x_hi = ax.get_xlim()
-            if mdates.date2num(today) <= x_hi + 0.5 * (x_hi - x_lo):
-                ax.axvline(today, color=COL_TODAY, linestyle="--", linewidth=0.8, alpha=0.8)
-                ax.text(today, ax.get_ylim()[1], "  heute",
-                        color=COL_TODAY, fontsize=8, va="top")
+    def _draw_today(self, today):
+        """Heute-Linie — nur, wenn sie den Verlauf nicht zusammenstaucht.
 
-        # (Vertikale Warn-/Grenz-Linien entfernt — die Schnittpunkte werden
-        # jetzt direkt als Marker auf der Prognosekurve angezeigt.)
+        Bei historischen Daten (z.B. Abellio: Messungen enden Jahre vor heute)
+        wuerde axvline() die Achse bis heute aufziehen und den eigentlichen
+        Verlauf in eine Ecke druecken.
+        """
+        ax = self._ax
+        x_lo, x_hi = ax.get_xlim()
+        if mdates.date2num(today) <= x_hi + 0.5 * (x_hi - x_lo):
+            ax.axvline(today, color=COL_TODAY, linestyle="--", linewidth=0.8, alpha=0.8)
+            ax.text(today, ax.get_ylim()[1], "  heute", color=COL_TODAY, fontsize=8, va="top")
 
-        # Prognose-Parameter-Info und "Keine Prognose vorhanden"-Hinweis
-        # werden NICHT im Plot gezeichnet, sondern von der View als
-        # Kacheln unter dem Diagramm platziert (siehe self._prognose_info
-        # und self._prognose_available).
-        info = getattr(self, "_prognose_info", []) or []
-        self._prognose_available = bool(info) or prognose_drawn
-
-        # Achsenformat
+    def _format_axes(self, x_mode, y_label):
+        ax = self._ax
         if x_mode == "datum":
             ax.xaxis.set_major_locator(mdates.AutoDateLocator())
             # Bei kurzen Zeitraeumen (z.B. alle Messwerte eines Tages) waere
@@ -436,15 +423,17 @@ class PlotCanvas(FigureCanvasQTAgg):
             ax.xaxis.set_major_formatter(FuncFormatter(_km_formatter))
             ax.set_xlabel("Laufleistung")
         ax.set_ylabel(y_label)
+
+    def _draw_legend_or_hint(self, plotted, reihen, x_mode):
+        ax = self._ax
         if plotted:
             ax.legend(loc="upper right", fontsize=8, frameon=False)
-        else:
-            hint = ("Keine Laufleistung in den Daten"
-                    if x_mode == "km" and any(mr.historie for _, mr, _ in reihen)
-                    else "Keine Messwerte für diese Auswahl")
-            ax.text(0.5, 0.5, hint, ha="center", va="center", transform=ax.transAxes,
-                    color="#8A8F99", fontsize=11)
-        self.draw_idle()
+            return
+        hint = ("Keine Laufleistung in den Daten"
+                if x_mode == "km" and any(mr.historie for _, mr, _ in reihen)
+                else "Keine Messwerte für diese Auswahl")
+        ax.text(0.5, 0.5, hint, ha="center", va="center", transform=ax.transAxes,
+                color="#8A8F99", fontsize=11)
 
 
 class PlotPane(QWidget):

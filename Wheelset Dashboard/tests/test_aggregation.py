@@ -2,7 +2,9 @@
 Strukturzahlen und Gantt-Eintraege — ohne Qt, mit handgebauten Objekten."""
 from datetime import datetime, timedelta
 
-from wheelset_dashboard.data.csv_source import MESSPOS_PREFIX, NO_DG_LABEL, NO_RS_LABEL
+from wheelset_dashboard.data.structure import (
+    KIND_MESSPOSITION, KIND_SAMMEL, MESSPOS_PREFIX, NO_DG_LABEL, NO_RS_LABEL,
+)
 from wheelset_dashboard.data.models import (
     Achse, Drehgestell, Einheit, Flotte, LagerKomponente, Messpunkt, Messreihe, Prognose,
     Rad, Side, StatusAmpel,
@@ -24,8 +26,8 @@ def rad(side, **stati):
     return Rad(seite=side, messreihen={n: mr(n, s) for n, s in stati.items()})
 
 
-def achse(pos, raeder):
-    return Achse(rs_id=None, rs_bez="", rs_einbaupos=pos, raeder=raeder)
+def achse(pos, raeder, kind="radsatz"):
+    return Achse(rs_id=None, rs_bez="", rs_einbaupos=pos, raeder=raeder, kind=kind)
 
 
 def lager_achse(raeder):
@@ -56,7 +58,7 @@ def test_achsweiter_status_gilt_auch_im_lager_fuer_beide_raeder():
 
 
 def test_lager_komponente_nur_mit_seitenlosen_werten_ist_eine_messstelle():
-    k = lager_dg(achse(NO_RS_LABEL, {Side.UNSPECIFIED: rad(Side.UNSPECIFIED, LKD=Y)}))
+    k = lager_dg(achse(NO_RS_LABEL, {Side.UNSPECIFIED: rad(Side.UNSPECIFIED, LKD=Y)}, KIND_SAMMEL))
     c = status_counts(k)
     assert c[Y] == 1 and sum(c.values()) == 1
 
@@ -97,10 +99,10 @@ def test_messgroesse_ohne_messpunkt_hat_keinen_wert():
 def test_sammelobjekte_und_messpositionen_zaehlen_nicht_als_echte_struktur():
     dg = Drehgestell(dg_id=1, dg_bez="", dg_einbaupos="DG", achsen={
         "Achse 1": achse("Achse 1", {}),
-        NO_RS_LABEL: achse(NO_RS_LABEL, {}),
-        f"{MESSPOS_PREFIX} 1": achse(f"{MESSPOS_PREFIX} 1", {}),
-        f"{MESSPOS_PREFIX} 2": achse(f"{MESSPOS_PREFIX} 2", {})})
-    sammel = Drehgestell(dg_id=None, dg_bez="", dg_einbaupos=NO_DG_LABEL)
+        NO_RS_LABEL: achse(NO_RS_LABEL, {}, KIND_SAMMEL),
+        f"{MESSPOS_PREFIX} 1": achse(f"{MESSPOS_PREFIX} 1", {}, KIND_MESSPOSITION),
+        f"{MESSPOS_PREFIX} 2": achse(f"{MESSPOS_PREFIX} 2", {}, KIND_MESSPOSITION)})
+    sammel = Drehgestell(dg_id=None, dg_bez="", dg_einbaupos=NO_DG_LABEL, synthetic=True)
     e = Einheit(topeinheit_id=1, topeinheit_bez="E", drehgestelle={"a": dg, "b": sammel})
     assert n_real_dg(e) == 1
     assert n_real_achsen(dg) == 1

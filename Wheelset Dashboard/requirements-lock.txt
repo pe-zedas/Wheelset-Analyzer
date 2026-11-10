@@ -1,0 +1,15 @@
+# Zuletzt gemeinsam getestete Versionen (Python 3.13.7, Windows 11, 2026-11-10).
+# Kein vollstaendiger Lock der Unterabhaengigkeiten: Bei Problemen nach einem
+# Update zuerst auf diese Staende zurueckgehen:  pip install -r requirements-lock.txt
+PySide6==6.12.0
+shiboken6==6.12.0
+matplotlib==3.10.5
+numpy==2.3.2
+oracledb==4.0.0
+PyYAML==6.0.2
+openpyxl==3.1.5
+qtawesome==1.4.2
+qtpy==2.4.3
+# nur Entwicklung
+pytest==8.4.2
+pyflakes==3.4.0

@@ -10,7 +10,9 @@ import argparse
 import logging
 from pathlib import Path
 
-from .data.repository import Repository, RepositoryConfig
+from wheelset_dashboard.data.repository import Repository, RepositoryConfig
+from wheelset_dashboard.logic.lager_state import recompute_all as recompute_lager
+from wheelset_dashboard.logic.status import recompute_all as recompute_status
 
 
 def main():
@@ -35,9 +37,7 @@ def main():
 
     flotte = repo.load()
 
-    # Logik-Pass (P2): Status + Lager-Zustand
-    from .logic.status import recompute_all as recompute_status
-    from .logic.lager_state import recompute_all as recompute_lager
+    # Logik-Pass: Status + Lager-Zustand
     recompute_status(flotte)
     lager_counts = recompute_lager(flotte)
 

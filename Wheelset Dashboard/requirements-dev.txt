@@ -1,0 +1,4 @@
+# Entwicklung: Tests und statische Pruefung
+-r requirements.txt
+pytest>=8
+pyflakes>=3

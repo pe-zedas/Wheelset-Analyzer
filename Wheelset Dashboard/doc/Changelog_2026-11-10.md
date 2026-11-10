@@ -306,10 +306,58 @@ der Kopfkommentar der Datei hält das fest. Offen: ob er für Abellio/MOB reakti
 Backend rechnet nur das VGF-Schema) und ob er weiter mit dem Backend abgeglichen wird.
 
 
+## 18. Umbau der Struktur (Schritte 5 und 6 der Verbesserungsliste)
+
+Ziel: weniger doppelter Code, klarere Schichten, kürzere Funktionen — **ohne Verhaltensänderung**.
+
+**Datenschicht**
+- `data/csv_source.py` zerlegt: `parsing.py` (Text → Wert), `structure.py` (Aufbau Flotte/Lager aus
+  Rohzeilen, `build_flotte`), `prognose_source.py` (Prognose-Anreicherung), `csv_source.py` liest nur noch Dateien.
+- **CSV und Oracle teilen jetzt denselben Aufbau und dieselbe Prognose-Anreicherung.** Vorher gab es zwei
+  zu rund 60 % deckungsgleiche Prognose-Parser (je 130–160 Zeilen) und zwei Rohdaten-Parser. Die Oracle-Werte
+  werden nur zuvor in Text umgewandelt. Dabei vereinheitlicht: Die Bezeichnung wird in beiden Wegen gestrippt
+  (die CSV tat es schon, Oracle nicht).
+- **Ein Oracle-Ladeweg:** Connect-String, zwei parallele Sessions. Entfernt: `load_flotte_from_oracle`,
+  `load_flotte_from_connect_string`, `load_prognose_from_connect_string`. DSN/Nutzer/Passwort aus dem Dialog
+  werden zum Connect-String zusammengesetzt; unvollständige Angaben melden einen klaren Fehler.
+- `init_oracle_client` (Thick-Mode) steht nur noch an einer Stelle (vorher dreimal).
+- **Synthetische Strukturen sind im Modell markiert** (`Achse.kind` = `radsatz`/`sammel`/`messposition`,
+  `Drehgestell.synthetic`) statt über Beschriftungen erkannt zu werden. Ansichten und Auswertung importieren
+  keine Konstanten mehr aus dem CSV-Loader; `_worst_status`/`_worst_messreihe` heißen öffentlich
+  `worst_status`/`worst_messreihe`.
+- Profil-Schalter `backend_prognosis` statt `profile.name != "vgf"` im Hauptfenster.
+
+**Oberfläche**
+- `ui/views.py` (1.170 Zeilen) → Paket `ui/views/` (common, flotte, einheit, drehgestell, achse, lager).
+  Der Anzeigemodus „Messwerte anzeigen“ wird über `show_values()` gelesen.
+- Lange Funktionen zerlegt: `PlotCanvas.plot_messreihen` (322 → ca. 35 Zeilen Ablauf + Teilschritte),
+  `MainWindow.__init__` (163), `GanttCanvas.set_entries` (145), `AchseView._redraw_current` (123),
+  `SettingsDialog.__init__` (120, Baum jetzt datengesteuert), `collect_gantt_entries` (120) und der
+  parallele Oracle-Lader.
+
+**Hygiene**
+- `perf.py`: gemeinsamer Zeitmesser (`timed`, `Timer`) ersetzt rund 45 verstreute `time.monotonic()`-Paare;
+  alle bisherigen DEBUG-Zeitangaben bleiben erhalten.
+- `smoketest.py` und `oracle_e2e.py` nach `tools/` (`python -m tools.smoketest`).
+- `keyring` aus `requirements.txt` entfernt (wurde nirgends benutzt); neu `pyproject.toml`,
+  `requirements-dev.txt`, `requirements-lock.txt` (zuletzt getestete Versionen). README neu geschrieben,
+  Kommentar in `start_vgf_oracle.bat` korrigiert.
+- Ungenutzte Importe entfernt (außer in `logic/prognose.py`, siehe Punkt 17).
+
+**Prüfung (jeweils gegen den Stand vor dem Umbau, VGF per CSV und Oracle, Abellio und MOB live aus Oracle):**
+- Struktur-Fingerabdruck der geladenen Flotte (alle Einheiten, Drehgestelle, Achsen, Räder, Messreihen, Messpunkte,
+  Status, Prognosen, Lager): **identisch** für alle drei Profile; auch VGF über Oracle mit 64 prognostizierten Messreihen.
+- 84 gerenderte Ansichten je Lauf (Flotte, Einheit, Drehgestell, Achse mit mehreren Reitern und km-Modus, Lager,
+  alle Seiten des Einstellungsdialogs; Uhr eingefroren): **pixelgleich**. Dabei wurde ein echter Fehler gefunden
+  und behoben (das Radachsen-Bild fehlte nach dem Verschieben von `views.py`, der Dateipfad war eine Ebene zu flach).
+- `plot_messreihen`: alle 3.960 VGF-Diagramme (alle Achsen inkl. Lager, alle Messgrößen, drei Radauswahlen, beide
+  X-Achsen) alt gegen neu: **0 Abweichungen**.
+- `collect_gantt_entries`: alle Gruppen alt gegen neu bei eingefrorener Uhr: VGF 72, Abellio 653, **0 Abweichungen**.
+
 ## Tests
 
 `tests/test_abellio_profile.py` (33 Fälle): Namensvarianten inkl. des
 Laufradsatz-Falls, Nullwerte, kollidierende Drehgestelle, Einheit ohne
 Struktur, Toleranzbereiche als Grenzwerte, nicht zuordenbare Lager-Zeilen und
-dass VGF unverändert bleibt. `tests/test_donut_counts.py` (4 Fälle) sichert die Donut-Zählung, `tests/test_mob_profile.py` (23 Fälle) das MOB-Profil (echte Bezeichnungen, Messpositionen, unvollständige Termine, Lager, Drehgestell-Wechsel), `tests/test_lager_reinstalled.py` (5 Fälle) das Ausblenden wieder eingebauter Komponenten. Gesamt 144 Tests grün (neu: `test_smoke_profiles.py` 15 Fälle, `test_background_loading.py` 9, `test_aggregation.py` 10, `test_app_paths.py` 16, `test_repository.py` 7, `test_achse_view_controls.py` 6, `test_messdaten_icon.py` 8); zusätzlich ein
+dass VGF unverändert bleibt. `tests/test_donut_counts.py` (4 Fälle) sichert die Donut-Zählung, `tests/test_mob_profile.py` (23 Fälle) das MOB-Profil (echte Bezeichnungen, Messpositionen, unvollständige Termine, Lager, Drehgestell-Wechsel), `tests/test_lager_reinstalled.py` (5 Fälle) das Ausblenden wieder eingebauter Komponenten. Gesamt 171 Tests grün (neu: `test_smoke_profiles.py` 15 Fälle, `test_background_loading.py` 9, `test_aggregation.py` 10, `test_app_paths.py` 16, `test_repository.py` 7, `test_achse_view_controls.py` 6, `test_messdaten_icon.py` 8, `test_structure.py` 19, `test_perf.py` 5); zusätzlich ein
 Strukturvergleich VGF vor/nach der Änderung (identischer Fingerabdruck).

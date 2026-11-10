@@ -12,16 +12,16 @@ from PySide6.QtCore import Qt, QSize, QTimer, Slot
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QMainWindow,
-    QMenu, QMenuBar, QMessageBox, QProgressBar, QPushButton, QStackedWidget,
-    QStatusBar, QVBoxLayout, QWidget,
+    QMessageBox, QProgressBar, QPushButton, QStackedWidget, QStatusBar, QVBoxLayout, QWidget,
 )
 
 from ..config.app_paths import build_connect_string
-from ..data.models import ComponentState, Flotte, PrognoseConfig
+from ..data.models import Achse, Drehgestell, Einheit, Flotte, PrognoseConfig
 from ..data.repository import Repository, RepositoryConfig
 from ..logic.export import export_raw_csv, werkstattliste_to_xlsx
 from ..logic.lager_state import recompute_all as recompute_lager
 from ..logic.status import recompute_all as recompute_status
+from ..perf import Timer, timed
 from .jobs import BackgroundJob
 from .settings_dialog import SettingsDialog
 from . import views as _views
@@ -124,8 +124,7 @@ class MainWindow(QMainWindow):
     def __init__(self, repo: Repository, parent=None, async_load: bool = True):
         """``async_load=False`` wartet nach jedem Laden/Backend-Lauf auf das
         Ende (Tests, Skripte). Die Anwendung selbst laedt im Hintergrund."""
-        import time as _time
-        _ti0 = _time.monotonic()
+        self._startup = Timer()          # Dauer seit dem Fensterstart (Startzeit-Log)
         super().__init__(parent)
         self._repo = repo
         self._flotte: Optional[Flotte] = None
@@ -139,9 +138,7 @@ class MainWindow(QMainWindow):
         self._current_path: List[Tuple[str, str]] = []
         self.setWindowTitle("Wheelset Analyzer Dashboard")
         self.resize(1200, 740)
-        self._ti0 = _ti0
-        _ti_a = _time.monotonic()
-        log.debug("MW phase: super+title+resize=%.2fs", _ti_a - _ti0)
+        log.debug("MW phase: super+title+resize=%.2fs", self._startup.seconds)
         # Zustand: hat der jeweilige Drilldown bereits eine aktive
         # Verbindung? disconnect() nur aufzurufen, wenn verbunden,
         # vermeidet die PySide6-``libpyside: Failed to disconnect``
@@ -149,24 +146,46 @@ class MainWindow(QMainWindow):
         self._dg_drilldown_connected = False
         self._achse_drilldown_connected = False
 
+        self.setCentralWidget(self._build_central())
+        self._build_statusbar()
+        with timed("MW phase: Menue", None) as t_menu:
+            self._build_menu()
+        log.debug("MW phases: pre_reload_total=%.2fs (menu=%.2fs)",
+                  self._startup.seconds, t_menu.seconds)
+        self._wire_navigation()
+
+        # Auto-Refresh Timer (default off hier; wird nach Einstellungen gesetzt)
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._auto_reload)
+
+        # erste Ladung (im Hintergrund: das Fenster erscheint sofort)
+        self._update_schema_label()
+        self.reload_data()
+        self.navigate([])
+
+    # ------------------- aufbau ----------------------------
+
+    def _build_central(self) -> QWidget:
+        """Side-Nav links; rechts Kopfzeile und gestapelte Ansichten."""
         central = QWidget()
         root = QHBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-
-        import time as _time
-        _ts0 = _time.monotonic()
-        self._nav = SideNav()
-        _ts1 = _time.monotonic()
-        log.debug("MW phase: SideNav (mit qta.icons)=%.2fs", _ts1 - _ts0)
+        with timed("MW phase: SideNav (mit qta.icons)", log):
+            self._nav = SideNav()
         root.addWidget(self._nav)
 
         right = QWidget()
         right_lay = QVBoxLayout(right)
         right_lay.setContentsMargins(0, 0, 0, 0)
         right_lay.setSpacing(0)
+        right_lay.addLayout(self._build_header())
+        right_lay.addWidget(self._build_views(), 1)
+        root.addWidget(right, 1)
+        return central
 
-        # Kopfzeile: Breadcrumb links, zedas-asset-Logo rechts
+    def _build_header(self) -> QHBoxLayout:
+        """Kopfzeile: Breadcrumb links, Schema-Etikett und zedas-asset-Logo rechts."""
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 12, 0)
         header.setSpacing(0)
@@ -184,51 +203,40 @@ class MainWindow(QMainWindow):
         header.addSpacing(12)
 
         logo_path = Path(__file__).parent / "assets" / "zedas_asset.svg"
-        _tl0 = _time.monotonic()
-        if logo_path.exists():
-            from PySide6.QtSvgWidgets import QSvgWidget
-            logo = QSvgWidget(str(logo_path))
-            # SVG-Verhaeltnis ~5.59:1 (342.9 x 61.38 mm) → 32 px hoch → ~179 breit
-            logo.setFixedSize(QSize(179, 32))
-            logo.setToolTip("zedas® asset")
-            header.addWidget(logo, 0, Qt.AlignVCenter)
-        _tl1 = _time.monotonic()
-        log.debug("MW phase: Logo (QSvgWidget)=%.2fs", _tl1 - _tl0)
-        right_lay.addLayout(header)
+        with timed("MW phase: Logo (QSvgWidget)", log):
+            if logo_path.exists():
+                from PySide6.QtSvgWidgets import QSvgWidget
+                logo = QSvgWidget(str(logo_path))
+                # SVG-Verhaeltnis ~5.59:1 (342.9 x 61.38 mm) → 32 px hoch → ~179 breit
+                logo.setFixedSize(QSize(179, 32))
+                logo.setToolTip("zedas® asset")
+                header.addWidget(logo, 0, Qt.AlignVCenter)
+        return header
 
-        import time as _time
-        _tv0 = _time.monotonic()
+    def _build_views(self) -> QStackedWidget:
+        """Die fuenf Ansichten (Flotte, Einheit, Drehgestell, Achse, Lager)."""
         self._stack = QStackedWidget()
-        self._view_flotte = FlotteView()
-        _tv1 = _time.monotonic()
-        self._view_einheit = EinheitView()
-        _tv2 = _time.monotonic()
-        self._view_dg = DrehgestellView()
-        _tv3 = _time.monotonic()
-        self._view_achse = AchseView()
-        _tv4 = _time.monotonic()
-        self._view_lager = LagerView()
-        _tv5 = _time.monotonic()
-        log.debug(
-            "MW views: flotte=%.2fs einheit=%.2fs dg=%.2fs achse=%.2fs lager=%.2fs",
-            _tv1-_tv0, _tv2-_tv1, _tv3-_tv2, _tv4-_tv3, _tv5-_tv4,
-        )
-        for v in (self._view_flotte, self._view_einheit, self._view_dg,
-                  self._view_achse, self._view_lager):
-            self._stack.addWidget(v)
+        times = []
+        for name, attr, cls in (("flotte", "_view_flotte", FlotteView),
+                                ("einheit", "_view_einheit", EinheitView),
+                                ("dg", "_view_dg", DrehgestellView),
+                                ("achse", "_view_achse", AchseView),
+                                ("lager", "_view_lager", LagerView)):
+            with timed(name, None) as t:
+                setattr(self, attr, cls())
+            times.append(f"{name}={t.seconds:.2f}s")
+            self._stack.addWidget(getattr(self, attr))
+        log.debug("MW views: %s", " ".join(times))
 
-        # drilldown signals verbinden (alle vier Views)
+        # drilldown signals verbinden (Flotte und Einheit fest)
         self._view_flotte.drilldown.connect(self.navigate)
         self._view_einheit.drilldown.connect(self.navigate)
         # DG- und Achse-drilldown werden je nach Kontext umgeschaltet (Flotte vs. Lager)
         self._set_dg_drilldown_mode("flotte")
         self._set_achse_drilldown_mode("flotte")
+        return self._stack
 
-        right_lay.addWidget(self._stack, 1)
-        root.addWidget(right, 1)
-        self.setCentralWidget(central)
-
-        # Statusbar
+    def _build_statusbar(self):
         self.setStatusBar(QStatusBar())
         self._status_lbl = QLabel("")
         self.statusBar().addWidget(self._status_lbl)
@@ -246,7 +254,7 @@ class MainWindow(QMainWindow):
             "(farblich entsprechend des Zustands).")
         self._values_cb.toggled.connect(self._toggle_show_values)
         self.statusBar().addPermanentWidget(self._values_cb)
-        # Prognose-Neuberechnung ist jetzt im Einstellungsdialog
+        # Prognose-Neuberechnung ist im Einstellungsdialog
         # (Extras → Einstellungen → Prognose · Neuberechnung).
         self._reload_btn = QPushButton("Neu laden")
         self._reload_btn.setIconSize(QSize(16, 16))
@@ -259,31 +267,12 @@ class MainWindow(QMainWindow):
             lambda *_: self._update_values_cb_visibility())
         self._update_values_cb_visibility()
 
-        # Menueleiste
-        import time as _time
-        _tm0 = _time.monotonic()
-        self._build_menu()
-        _tm1 = _time.monotonic()
-        log.debug(
-            "MW phases: pre_reload_total=%.2fs (menu=%.2fs)",
-            _tm1 - self._ti0, _tm1 - _tm0,
-        )
-
-        # Nav-Buttons verdrahten
+    def _wire_navigation(self):
         self._nav.button("flotte").clicked.connect(lambda: self.navigate([]))
         self._nav.button("lager_alle").clicked.connect(lambda: self._show_lager())
         self._nav.button("settings").clicked.connect(self.open_settings)
         # Lager-Drilldown: Doppelklick auf eine Achse zeigt deren Historie
         self._view_lager.lager_drilldown.connect(self._open_lager_axle)
-
-        # Auto-Refresh Timer (default off hier; wird nach Einstellungen gesetzt)
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._auto_reload)
-
-        # erste Ladung (im Hintergrund: das Fenster erscheint sofort)
-        self._update_schema_label()
-        self.reload_data()
-        self.navigate([])
 
     # ------------------- menu ----------------------------
 
@@ -406,15 +395,14 @@ class MainWindow(QMainWindow):
         repo = self._repo
 
         def work():
-            t0 = time.monotonic()
-            flotte = repo.load()
-            t1 = time.monotonic()
-            recompute_status(flotte)
-            t2 = time.monotonic()
-            recompute_lager(flotte)
-            t3 = time.monotonic()
+            with timed("repo.load", None) as t_load:
+                flotte = repo.load()
+            with timed("status", None) as t_status:
+                recompute_status(flotte)
+            with timed("lager", None) as t_lager:
+                recompute_lager(flotte)
             log.debug("reload_data timing: repo.load=%.2fs, status=%.2fs, lager=%.2fs",
-                      t1 - t0, t2 - t1, t3 - t2)
+                      t_load.seconds, t_status.seconds, t_lager.seconds)
             return repo, flotte
 
         self._set_busy(f"Lade Daten …  (Profil: {repo.profile.name})")
@@ -448,7 +436,7 @@ class MainWindow(QMainWindow):
                 if not self._first_data_logged:
                     self._first_data_logged = True
                     log.debug("Start-Timing: erste Daten sichtbar nach %.2fs (seit MainWindow-Start)",
-                              time.monotonic() - self._ti0)
+                              self._startup.seconds)
             except Exception as exc:  # noqa: BLE001
                 log.exception("Fehler beim Anzeigen der geladenen Daten")
                 QMessageBox.critical(self, "Fehler beim Laden", str(exc))
@@ -483,7 +471,7 @@ class MainWindow(QMainWindow):
         werden die Daten neu geladen.
         """
         from ..logic.backend_runner import run_backend_prognose
-        if self._repo.profile.name != "vgf":
+        if not self._repo.profile.backend_prognosis:
             # Das Backend liest immer die VGF-Datenbank (eigener Connect-String,
             # VGF-Spaltennamen) und wuerde hier die falsche Prognose rechnen.
             QMessageBox.information(
@@ -679,7 +667,6 @@ class MainWindow(QMainWindow):
 
     def _synth_einheit_dg(self, komp):
         """Baut Platzhalter-Einheit und -DG fuer eine Lager-Komponente."""
-        from ..data.models import Einheit, Drehgestell
         label_dg = komp.dg_bez or komp.rs_bez or "Lager-Komponente"
         einheit = Einheit(topeinheit_id=None,
                           topeinheit_bez=f"Lager · {komp.letzte_einheit or '-'}")
@@ -694,8 +681,6 @@ class MainWindow(QMainWindow):
         - komp.kind == 'drehgestell' und achse gegeben → zeige AchseView fuer diese Achse
         - komp.kind == 'achse' → zeige direkt AchseView
         """
-        from ..data.models import Achse, Einheit, Drehgestell
-
         # Achsen-Komponente ohne DG-Zwischenschritt
         if komp.kind == "achse":
             a = Achse(

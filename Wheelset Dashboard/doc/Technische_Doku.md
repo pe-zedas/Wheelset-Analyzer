@@ -1,6 +1,6 @@
 # Wheelset Dashboard — Technische Dokumentation
 
-Stand: 2026-10-28 · Version 1.1 (RC)
+Stand: 2026-11-10 · Version 1.1 (RC)
 
 ## 1. Architekturübersicht
 
@@ -28,15 +28,18 @@ rufen nur noch diese Funktionen auf.
 Wheelset Dashboard/
 ├── wheelset_dashboard/
 │   ├── main.py                 # Einstiegspunkt
-│   ├── smoketest.py            # Konsolen-Smoke-Test der Datenschicht
+│   ├── perf.py                 # Zeitmesser (timed/Timer) für die DEBUG-Zeitangaben
 │   ├── config/
 │   │   ├── logging_setup.py    # Rotierendes File-Logging + Exception-Hook
 │   │   └── profiles/*.yaml     # Kundenprofile (vgf, abellio, mob)
 │   ├── data/
 │   │   ├── models.py           # Dataclasses Flotte/Einheit/DG/Achse/Rad/Messreihe
 │   │   ├── profile.py          # YAML-Profil-Loader + ZARTBEZ-Klassifikation
-│   │   ├── csv_source.py       # CSV-Loader (Profil-gesteuert)
-│   │   ├── oracle_source.py    # Oracle-Loader + Testverbindung
+│   │   ├── parsing.py          # Text → Wert (Zahl/Datum), Zeilen als Text
+│   │   ├── structure.py        # Aufbau Flotte/Lager aus Rohzeilen (build_flotte, finalize_structure) — für CSV und Oracle gemeinsam
+│   │   ├── prognose_source.py  # Prognose-Tabelle an die Messreihen hängen (attach_prognose) — für CSV und Oracle gemeinsam
+│   │   ├── csv_source.py       # CSV lesen (Rohdaten + Prognose)
+│   │   ├── oracle_source.py    # Oracle: zwei parallele Abfragen + Testverbindung
 │   │   └── repository.py       # Fassade (einheitlicher Zugriff)
 │   ├── logic/
 │   │   ├── status.py           # Ampel aus Ist + Prognose (schlechter gewinnt)
@@ -49,13 +52,14 @@ Wheelset Dashboard/
 │       ├── jobs.py             # BackgroundJob: Laden/Backend-Lauf im Hintergrund-Thread
 │       ├── settings_dialog.py  # Settings-Dialog + Testverbindung
 │       ├── widgets.py          # AmpelDot, StatusPill, KpiCard
-│       ├── views.py            # L1-L3-Views + L4 AchseView mit Reitern
+│       ├── views/              # Ansichten: common (Basis, Zellen), flotte, einheit, drehgestell, achse, lager
 │       ├── overview_widgets.py # DonutCanvas + GanttCanvas
 │       ├── plot_widget.py      # PlotCanvas für Detail-Plots
 │       └── style.qss           # Light-Theme-Stylesheet
 ├── tests/                       # pytest (Datenregeln, Aggregation, Smoke je Profil, Laden im Hintergrund)
+├── tools/                       # Entwickler-Hilfsprogramme: smoketest, oracle_e2e (python -m tools.<name>)
 ├── doc/                         # PRD, Benutzerhandbuch, diese Datei, Freigabe-Checkliste
-├── requirements.txt
+├── pyproject.toml, requirements.txt, requirements-dev.txt, requirements-lock.txt
 └── README.md
 ```
 
@@ -75,9 +79,9 @@ Siehe `wheelset_dashboard/data/models.py`:
 
 **Letzter Messwert**: `Messreihe.letzter_wert()` liefert den Messpunkt mit **max(datum)** — robust auch bei unsortierter CSV-Reihenfolge.
 
-**Aggregations-Helfer** `_worst_messreihe(prev, cand)` liefert die „schlechtere" zweier Messreihen: schlechter Status schlägt besseren Status; bei Gleichstand entscheidet der numerisch schlechtere letzte Wert (Richtung aus den Schwellen bzw. aus `direction`).
+**Aggregations-Helfer** `worst_messreihe(prev, cand)` liefert die „schlechtere" zweier Messreihen: schlechter Status schlägt besseren Status; bei Gleichstand entscheidet der numerisch schlechtere letzte Wert (Richtung aus den Schwellen bzw. aus `direction`).
 
-Alle Status-Werte werden über `logic/status.recompute_all(flotte)` berechnet und in die Messreihen geschrieben; Entitätsstatus = `_worst_status` der untergeordneten Reihen.
+Alle Status-Werte werden über `logic/status.recompute_all(flotte)` berechnet und in die Messreihen geschrieben; Entitätsstatus = `worst_status` der untergeordneten Reihen.
 
 ### 3.1 Status-Logik (`logic/status.py`)
 
@@ -87,7 +91,7 @@ Alle Status-Werte werden über `logic/status.recompute_all(flotte)` berechnet un
   - `both` → beide Seiten.
   Zusätzliche Validitätsprüfung: eine Warn-/Grenz-Schwelle gilt nur, wenn sie innerhalb des gültigen Bereichs liegt (`gelb_min < max_val`, `gelb_min > min_val` usw.) — schützt vor inkonsistenten CSV-Werten wie `GELB_MAX = MIN`.
 - Die Prognose fließt NICHT in die Ampel ein (`classify_messreihe` nutzt ausschließlich den letzten Ist-Messwert gegen die Schwellen). Die frühere `classify_prognose`-Funktion und die zugehörigen `red_days`/`yellow_days`-Settings wurden am 2026-10-29 entfernt.
-- `classify_messreihe` ruft beide und verrechnet via `_worst_status`.
+- `classify_messreihe` ruft beide und verrechnet via `worst_status`.
 
 ## 4. Kundenprofil (YAML)
 
@@ -103,12 +107,13 @@ Jedes Profil beschreibt:
    | Schlüssel | Wirkung |
    |---|---|
    | `structure.dg_key: id` | Drehgestelle über `DGEINHEITID` statt über die Einbauposition führen. Nötig, wenn die Position nicht eindeutig ist (Abellio: viele DG heißen `Drehgestell`). Kollidiert eine Position innerhalb einer Einheit, wird die Bezeichnung angehängt (`Drehgestell · Laufdrehgestell / 50-466`); eindeutige bleiben kurz (`finalize_structure`). |
-   | `structure.fallback_axle: true` | Zeilen ohne Radsatz-Ebene (nur Einheit oder nur DG) bekommen die Sammel-Achse `(Radsatz-Zuordnung fehlt)`, sodass sie wie jede Achse im Diagramm erscheinen. Fehlt auch das Drehgestell, heißt es `(ohne Drehgestell)`. |
-   | `structure.wheel_positions: N` | Die Sammel-Achse enthält je Messtermin `N` Werte je Messgröße (MOB: 4). Termine mit genau `N` Werten werden nach Zeit sortiert und auf die synthetischen Achsen `Messposition 1..N` verteilt (je eine Zeitreihe, eine Rad-Seite `unspecified`). Termin = Werte mit höchstens 30 Minuten Abstand (`SESSION_GAP`). Termine mit anderer Anzahl bleiben in der Sammel-Achse. Die Nummer ist die Messreihenfolge, nicht belegt die Radnummer. `finalize_structure` → `split_wheel_positions`. Die UI zählt Sammel-Achse und Messpositionen nicht als echte Achsen (`is_synthetic_axle`). |
+   | `structure.fallback_axle: true` | Zeilen ohne Radsatz-Ebene (nur Einheit oder nur DG) bekommen die Sammel-Achse `(Radsatz-Zuordnung fehlt)`, sodass sie wie jede Achse im Diagramm erscheinen. Fehlt auch das Drehgestell, heißt es `(ohne Drehgestell)`. Beide sind im Modell markiert (`Achse.kind == "sammel"`, `Drehgestell.synthetic`); Ansichten prüfen die Markierung, nicht die Beschriftung. |
+   | `backend_prognosis: true` (oberste Ebene) | Das Prognose-Backend kann für dieses Schema rechnen; „Prognose neu berechnen“ ist freigegeben (nur VGF). |
+   | `structure.wheel_positions: N` | Die Sammel-Achse enthält je Messtermin `N` Werte je Messgröße (MOB: 4). Termine mit genau `N` Werten werden nach Zeit sortiert und auf die synthetischen Achsen `Messposition 1..N` verteilt (je eine Zeitreihe, eine Rad-Seite `unspecified`). Termin = Werte mit höchstens 30 Minuten Abstand (`SESSION_GAP`). Termine mit anderer Anzahl bleiben in der Sammel-Achse. Die Nummer ist die Messreihenfolge, nicht belegt die Radnummer. `structure.finalize_structure` → `split_wheel_positions`; die Achsen tragen `kind == "messposition"`. Sammel-Achse und Messpositionen zählen nicht als echte Achsen (`Achse.synthetic`). |
    | `thresholds.bereich_as_limits: true` | `MIN_BEREICH`/`MAX_BEREICH` (intern `bereich_min`/`bereich_max`) gelten als Grenzwerte (rot), wenn `MIN`/`MAX` leer sind. Es entsteht kein Gelb-Band. |
    | `measurement_catalog.<M>.valid_range: [lo, hi]` | Messwerte außerhalb werden beim Laden verworfen. Dient dazu, Platzhalter ohne Messung (`STAND = 0`) auszusortieren; bei Größen, für die 0 gültig ist (Hohllauf, Überwalzung), weglassen. |
 
-   `finalize_structure` blendet außerdem Lager-Komponenten aus, die wieder eingebaut sind (gleiche DG-ID bzw. Radsatz-ID mit eingebauten Zeilen, `drop_reinstalled_lager`; Fallback ohne DG-ID: Bezeichnung). Das gilt für alle Profile, wirkt aber nur auf die Lager-Liste; eingebaute Reihen und Prognose bleiben unverändert.
+   `structure.finalize_structure` (nach dem Einlesen, für CSV und Oracle gleich) blendet außerdem Lager-Komponenten aus, die wieder eingebaut sind (gleiche DG-ID bzw. Radsatz-ID mit eingebauten Zeilen, `drop_reinstalled_lager`; Fallback ohne DG-ID: Bezeichnung). Das gilt für alle Profile, wirkt aber nur auf die Lager-Liste; eingebaute Reihen und Prognose bleiben unverändert.
 
    Eine Zeile ohne Zuordnung zu Drehgestell **und** Radsatz im Lager (Ausbau gesetzt) wird übersprungen, statt zu einer Phantom-Komponente zu verschmelzen.
 
@@ -134,7 +139,7 @@ measurement_catalog:
 
 Datei in `wheelset_dashboard/config/profiles/mykunde.yaml` ablegen und per `--profile mykunde` bzw. Settings-Dialog wählen.
 
-## 4a. UI-Mechanik (`ui/views.py`)
+## 4a. UI-Mechanik (`ui/views/`)
 
 - **BaseView** stellt Tabellen-Fassade + Donut/Gantt-Overview für L1–L3 und Lager bereit. Enthält:
   - **Sortierung** aktiv (`setSortingEnabled(True)`), Status-Spalten mit Ampelpunkt-Widgets sortieren über `_AmpelSortItem` (eigene `__lt__` auf `Qt.UserRole`).
@@ -165,15 +170,17 @@ Laden (Oracle: Sekunden) und der Backend-Prognoselauf (Minuten) blockieren die O
 ## 5. Erweiterung: neue Messgröße
 
 1. Katalog-Eintrag im Profil ergänzen (`measurement_catalog`).
-2. `ui/views.MGROESSEN_SPALTEN` + `MGROESSEN_LABEL` erweitern (für die Status-Matrix in L1–L3).
+2. `ui/views/common.MGROESSEN_SPALTEN` + `MGROESSEN_LABEL` erweitern (für die Status-Matrix in L1–L3).
 3. Keine weitere Code-Änderung nötig — Detailansicht erzeugt den Reiter automatisch.
 
 ## 6. Oracle-Anbindung
 
 - Treiber: `python-oracledb` ≥ 2.0 (Thick-Mode für Verbindungen gegen ältere Oracle-Server).
-- `oracle_source.load_flotte_from_oracle(dsn, user, password, profile, thick_mode_lib_dir)` liest `BO_RADSATZDATEN` und erzeugt dieselbe Flotten-Struktur wie der CSV-Loader.
+- Ein Ladeweg: `oracle_source.load_flotte_and_prognose_from_connect_string(connect_string, profile, …)` liest `BO_RADSATZDATEN` und `BO_RADSATZDATEN_PROGNOSE` über zwei **parallele** Sessions. Die Einzelangaben DSN/Nutzer/Passwort aus dem Einstellungsdialog werden zum Connect-String `user/passwort@dsn` zusammengesetzt (`RepositoryConfig.connect_string()`); fehlt ein Teil, meldet das Repository „Zugangsdaten unvollständig“.
+- Aufbau der Struktur und Anreicherung um Prognosen sind dieselben Funktionen wie beim CSV-Laden (`structure.build_flotte`, `prognose_source.attach_prognose`); die Oracle-Werte werden nur in Text umgewandelt (`parsing.stringify_row`), damit beide Wege garantiert gleich rechnen (`tests/test_structure.py`).
+- Der Thick-Mode wird an einer Stelle initialisiert (`_ensure_oracle_client`); Fehler fallen auf den Thin-Mode zurück.
 - `oracle_source.test_connection()` prüft Verbindung + Zugriff auf `BO_RADSATZDATEN`.
-- Credentials werden lokal via `keyring` abgelegt (geplant für finale Release — aktuell im Klartext im Settings-Dialog).
+- Zugangsdaten stehen in `config/oracle_connect_string.txt` (eine Zeile je Kunde, nicht im Repository) oder werden im Einstellungsdialog eingegeben; es gibt keine Passwortspeicherung im Programm.
 
 ## 7. Logging
 
@@ -198,14 +205,19 @@ Testaufbau (`tests/`, `pytest.ini`; Qt läuft ohne Bildschirm):
 | `test_smoke_profiles.py` | je Profil mit synthetischen Daten (`synth.py`): laden, Fenster, jede Ebene bis zum Diagramm, Werkstattliste, Rohdaten-Export |
 | `test_background_loading.py` | Laden/Backend im Hintergrund: Fenster sofort bedienbar, Fehler, Zusammenfassen, Profilwechsel |
 | `test_app_paths.py`, `test_repository.py` | Connect-String-Datei (keine fremden Zugangsdaten), Quellenwahl |
+| `test_structure.py`, `test_perf.py` | CSV- und Oracle-Weg ergeben dieselbe Struktur und Prognose, Markierung synthetischer Strukturen, Parser, Zeitmesser |
+| `test_achse_view_controls.py`, `test_messdaten_icon.py` | Achsen-Diagramm (Auswahl), Spalte „Messdaten vorhanden“ |
 | `test_lager_reinstalled.py`, `test_lager_state.py`, `test_status.py` | Lager-Logik, Ampel |
 
 Smoke-Test der Datenschicht (nur Konsole):
 
 ```powershell
-python -m wheelset_dashboard.smoketest --profile vgf \
+python -m tools.smoketest --profile vgf \
     --csv-raw "..\Wheelset Analyzer_new_approach\bo_radsatzdaten_export.csv"
+python -m tools.oracle_e2e --profile mob      # Ende-zu-Ende gegen die Oracle-DB
 ```
+
+Statische Prüfung: `python -m pyflakes wheelset_dashboard tests tools`.
 
 ## 9. Build und Release
 
@@ -214,7 +226,7 @@ python -m wheelset_dashboard.smoketest --profile vgf \
 
 ## 10. Abhängigkeiten
 
-Siehe `requirements.txt`:
+Siehe `requirements.txt` (Mindestversionen), `requirements-dev.txt` (mit Tests) und `requirements-lock.txt` (zuletzt gemeinsam getestete Versionen):
 
 | Paket | Zweck |
 |-------|-------|
@@ -223,5 +235,4 @@ Siehe `requirements.txt`:
 | oracledb | Oracle-Treiber |
 | openpyxl | Werkstattlisten-Export |
 | PyYAML | Kundenprofile |
-| keyring | Passwort-Speicherung (geplant) |
-| qtawesome | Icon-Font (Material/Tabler) |
+| qtawesome | Icon-Font (Material/Tabler); zieht `qtpy`, das PySide6 wählen muss (das Paket setzt `QT_API=pyside6`) |

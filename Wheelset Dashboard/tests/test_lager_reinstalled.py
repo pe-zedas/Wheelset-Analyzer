@@ -2,7 +2,7 @@
 (es zaehlt der zuletzt benutzte Platz)."""
 from datetime import datetime
 
-from wheelset_dashboard.data.csv_source import drop_reinstalled_lager
+from wheelset_dashboard.data.structure import drop_reinstalled_lager
 from wheelset_dashboard.data.models import (
     Achse, Drehgestell, Einheit, Flotte, LagerKomponente,
 )

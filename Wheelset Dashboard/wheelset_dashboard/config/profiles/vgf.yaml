@@ -56,6 +56,10 @@ required_measurement_fields:
 # Hierarchie-Tiefe
 hierarchy_depth: 4   # bis Radsatz / Rad
 
+# Das Prognose-Backend (Wheelset Analyzer_new_approach) rechnet das VGF-Schema:
+# "Prognose neu berechnen" ist nur hier freigegeben.
+backend_prognosis: true
+
 # ZARTBEZ-Katalog: kanonische Messgröße -> Patterns + Rad-Seite
 measurement_catalog:
   LKD:

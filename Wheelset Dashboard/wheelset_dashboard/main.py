@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from .config.app_paths import ORACLE_CONNECT_FILE, read_oracle_connect_string
 from .config.logging_setup import install_global_exception_handler, setup_logging
 from .data.repository import Repository, RepositoryConfig
+from .perf import Timer, timed
 from .ui.main_window import MainWindow
 
 
@@ -70,8 +71,7 @@ DEFAULT_CSV_PROG = Path("../Wheelset Analyzer_new_approach/bo_radsatzdaten_progn
 
 
 def main():
-    import time as _time
-    t_start = _time.monotonic()
+    t_total = Timer()
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--profile", default="vgf", help="Kundenprofil (vgf/abellio/mob)")
@@ -90,7 +90,7 @@ def main():
     )
     _log = logging.getLogger(__name__)
     _log.info("Log-Datei: %s", log_path)
-    _log.debug("Start-Timing: imports=%.2fs (vom Prozessstart bis hier)", _time.monotonic() - t_start)
+    _log.debug("Start-Timing: imports=%.2fs (vom Prozessstart bis hier)", t_total.seconds)
 
     if args.source == "oracle":
         import os
@@ -120,18 +120,14 @@ def main():
             csv_prognose_path=Path(args.csv_prognose) if Path(args.csv_prognose).exists() else None,
         ))
 
-    t0 = _time.monotonic()
-    app = QApplication(sys.argv)
-    # QSS laden
-    qss_path = Path(__file__).parent / "ui" / "style.qss"
-    if qss_path.exists():
-        app.setStyleSheet(qss_path.read_text(encoding="utf-8"))
-    t1 = _time.monotonic()
-    _log.debug("Start-Timing: QApplication+QSS=%.2fs", t1 - t0)
+    with timed("Start-Timing: QApplication+QSS", _log):
+        app = QApplication(sys.argv)
+        qss_path = Path(__file__).parent / "ui" / "style.qss"
+        if qss_path.exists():
+            app.setStyleSheet(qss_path.read_text(encoding="utf-8"))
 
-    win = MainWindow(repo)
-    t2 = _time.monotonic()
-    _log.debug("Start-Timing: MainWindow-Init (Daten laden im Hintergrund)=%.2fs", t2 - t1)
+    with timed("Start-Timing: MainWindow-Init (Daten laden im Hintergrund)", _log):
+        win = MainWindow(repo)
 
     def _ui_crash(exc_type, exc_value, exc_tb):
         QMessageBox.critical(win, "Unerwarteter Fehler",
@@ -139,8 +135,7 @@ def main():
     install_global_exception_handler(_ui_crash)
 
     win.show()
-    t3 = _time.monotonic()
-    _log.debug("Start-Timing: GESAMT bis show()=%.2fs", t3 - t_start)
+    _log.debug("Start-Timing: GESAMT bis show()=%.2fs", t_total.seconds)
     sys.exit(app.exec())
 
 

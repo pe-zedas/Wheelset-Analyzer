@@ -56,8 +56,11 @@ class Profile:
     bereich_as_limits: bool = False
     # > 0: Messwerte der Sammel-Achse stammen von so vielen Raedern je Messtermin
     # (MOB: 4). Sie werden nach der Messreihenfolge auf "Messposition 1..N"
-    # verteilt (siehe csv_source.split_wheel_positions).
+    # verteilt (siehe structure.split_wheel_positions).
     wheel_positions: int = 0
+    # True: das Prognose-Backend kann fuer dieses Schema rechnen ("Prognose neu
+    # berechnen" ist freigegeben). Das Backend liest immer die VGF-Datenbank.
+    backend_prognosis: bool = False
     _classify_cache: Dict[str, Optional[Tuple[MeasurementDef, Side]]] = field(
         default_factory=dict, repr=False, compare=False)
 
@@ -139,6 +142,7 @@ def load_profile(path: Path) -> Profile:
         fallback_axle=bool(struct.get("fallback_axle", False)),
         bereich_as_limits=bool(thresholds.get("bereich_as_limits", False)),
         wheel_positions=int(struct.get("wheel_positions", 0) or 0),
+        backend_prognosis=bool(data.get("backend_prognosis", False)),
     )
 
 

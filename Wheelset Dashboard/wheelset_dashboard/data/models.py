@@ -97,7 +97,7 @@ class Rad:
     messreihen: Dict[str, Messreihe] = field(default_factory=dict)
 
     def status(self) -> StatusAmpel:
-        return _worst_status(m.status for m in self.messreihen.values())
+        return worst_status(m.status for m in self.messreihen.values())
 
 
 @dataclass
@@ -110,9 +110,17 @@ class Achse:
     aktuell: int = 1
     state: ComponentState = ComponentState.INSTALLED
     raeder: Dict[Side, Rad] = field(default_factory=dict)
+    # "radsatz" = echter Radsatz; "sammel" = Sammel-Achse fuer Messwerte ohne
+    # Radsatz-Zuordnung; "messposition" = aus der Messreihenfolge abgeleitete
+    # Position (MOB). Nur "radsatz" ist eine physische Achse.
+    kind: str = "radsatz"
+
+    @property
+    def synthetic(self) -> bool:
+        return self.kind != "radsatz"
 
     def status(self) -> StatusAmpel:
-        return _worst_status(r.status() for r in self.raeder.values())
+        return worst_status(r.status() for r in self.raeder.values())
 
 
 @dataclass
@@ -123,11 +131,13 @@ class Drehgestell:
     achsen: Dict[str, Achse] = field(default_factory=dict)
     # Falls kein Radsatz vorhanden (MOB-Fall), Messungen direkt am DG:
     direkt_messreihen: Dict[str, Messreihe] = field(default_factory=dict)
+    # Sammel-Drehgestell fuer Messwerte ohne Drehgestell-Zuordnung (kein echtes DG)
+    synthetic: bool = False
 
     def status(self) -> StatusAmpel:
         stati = [a.status() for a in self.achsen.values()]
         stati += [m.status for m in self.direkt_messreihen.values()]
-        return _worst_status(stati)
+        return worst_status(stati)
 
 
 @dataclass
@@ -137,7 +147,7 @@ class Einheit:
     drehgestelle: Dict[str, Drehgestell] = field(default_factory=dict)
 
     def status(self) -> StatusAmpel:
-        return _worst_status(d.status() for d in self.drehgestelle.values())
+        return worst_status(d.status() for d in self.drehgestelle.values())
 
 
 @dataclass
@@ -165,7 +175,7 @@ class LagerKomponente:
             stati.append(r.status())
         for a in self.achsen.values():
             stati.append(a.status())
-        return _worst_status(stati)
+        return worst_status(stati)
 
     def messgroessen_stati(self) -> Dict[str, StatusAmpel]:
         """Status pro Messgröße, aggregiert über Räder/Achsen/direkte Reihen."""
@@ -176,7 +186,7 @@ class LagerKomponente:
         out_mr: Dict[str, "Messreihe"] = {}
         def consider(mr: "Messreihe"):
             prev = out_mr.get(mr.messgroesse)
-            out_mr[mr.messgroesse] = _worst_messreihe(prev, mr)
+            out_mr[mr.messgroesse] = worst_messreihe(prev, mr)
         for mr in self.messreihen.values():
             consider(mr)
         for r in self.raeder.values():
@@ -225,7 +235,7 @@ class Flotte:
     lager: List[LagerKomponente] = field(default_factory=list)
 
     def status(self) -> StatusAmpel:
-        return _worst_status(e.status() for e in self.einheiten.values())
+        return worst_status(e.status() for e in self.einheiten.values())
 
     def alle_achsen(self):
         for e in self.einheiten.values():
@@ -242,7 +252,7 @@ _ORDER = {
 }
 
 
-def _worst_status(stati) -> StatusAmpel:
+def worst_status(stati) -> StatusAmpel:
     worst = StatusAmpel.GRAY
     for s in stati:
         if _ORDER[s] > _ORDER[worst]:
@@ -259,7 +269,7 @@ def _is_worse_value(a_val: float, b_val: float, template_mp: Optional[Messpunkt]
     return False
 
 
-def _worst_messreihe(prev: Optional[Messreihe], cand: Optional[Messreihe]) -> Optional[Messreihe]:
+def worst_messreihe(prev: Optional[Messreihe], cand: Optional[Messreihe]) -> Optional[Messreihe]:
     """Liefert die schlechtere der beiden Messreihen (Status zuerst, dann numerischer Wert)."""
     if prev is None:
         return cand

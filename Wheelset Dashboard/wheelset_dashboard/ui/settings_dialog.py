@@ -21,6 +21,26 @@ from PySide6.QtWidgets import (
 class SettingsDialog(QDialog):
     """QGIS-aehnliche Baumnavigation: ein Baum links, Seiten rechts."""
 
+    # Baum: (Text, Seitenschluessel, Titel im Kopf, Unterpunkte)
+    _TREE = (
+        ("Allgemein", "general", "Allgemein", ()),
+        ("Datenquelle", "source", "Datenquelle", (
+            ("CSV", "csv", "Datenquelle · CSV", ()),
+            ("Oracle", "oracle", "Datenquelle · Oracle", ()),
+        )),
+        ("Prognose", "prognose_overview", "Prognose", (
+            ("LKD", "prognose_overview", "Prognose · LKD", (
+                ("Reprofilierungs-Erkennung", "prognose_reprof",
+                 "Prognose · LKD · Reprofilierungs-Erkennung", ()),
+                ("Standard-Werte", "prognose_standard",
+                 "Prognose · LKD · Standard-Werte", ()),
+                ("Darstellung", "prognose_darstellung",
+                 "Prognose · LKD · Darstellung", ()),
+            )),
+            ("Neuberechnung", "prognose_recalc", "Prognose · Neuberechnung", ()),
+        )),
+    )
+
     def __init__(self, config: dict, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Einstellungen")
@@ -31,6 +51,28 @@ class SettingsDialog(QDialog):
         # der Einstellungen das Backend-Skript.
         self.recalc_requested: bool = False
 
+        root = self._build_frame()
+
+        # Seitenregister: {Seitenschluessel → page-index}
+        self._pages: dict[str, int] = {}
+        self._build_page_general(config)
+        self._build_page_source(config)
+        self._build_page_csv(config)
+        self._build_page_oracle(config)
+        self._build_page_prognose_lkd_reprof(config)
+        self._build_page_prognose_lkd_standard(config)
+        self._build_page_prognose_lkd_darstellung(config)
+        self._build_page_prognose_recalc(config)
+        self._build_tree()
+
+        # ---- Button-Zeile unten -----------------------------------
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns)
+
+    def _build_frame(self) -> QVBoxLayout:
+        """Kopfzeile mit dem gewaehlten Abschnitt, Baum links, Seitenstapel rechts."""
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(8)
@@ -43,15 +85,15 @@ class SettingsDialog(QDialog):
         )
         root.addWidget(self._page_header)
 
-        # Trenner
-        sep = QFrame(); sep.setFrameShape(QFrame.HLine); sep.setFrameShadow(QFrame.Sunken)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setFrameShadow(QFrame.Sunken)
         root.addWidget(sep)
 
         # Splitter: Baum links, Seiten rechts
         self._splitter = QSplitter(Qt.Horizontal)
         root.addWidget(self._splitter, 1)
 
-        # ---- Baum links -------------------------------------------
         self._tree = QTreeWidget()
         self._tree.setHeaderHidden(True)
         self._tree.setIndentation(14)
@@ -65,7 +107,6 @@ class SettingsDialog(QDialog):
         )
         self._splitter.addWidget(self._tree)
 
-        # ---- Seiten rechts ----------------------------------------
         self._stack = QStackedWidget()
         self._stack.setStyleSheet(
             "QStackedWidget { background: #FFFFFF; border: 1px solid #E2E4EA; "
@@ -74,73 +115,32 @@ class SettingsDialog(QDialog):
         self._splitter.addWidget(self._stack)
         self._splitter.setStretchFactor(0, 0)
         self._splitter.setStretchFactor(1, 1)
+        return root
 
-        # Seitenregister: {baum-pfad → page-index}
-        self._pages: dict[str, int] = {}
+    def _build_tree(self):
+        """Baum aus ``_TREE`` aufbauen und mit den Seiten verknuepfen."""
+        self._item_to_page = {}      # id(Baumeintrag) -> (Titel, page-index)
 
-        # ---- Seiten anlegen ---------------------------------------
-        self._build_page_general(config)
-        self._build_page_source(config)
-        self._build_page_csv(config)
-        self._build_page_oracle(config)
-        self._build_page_prognose_lkd_reprof(config)
-        self._build_page_prognose_lkd_standard(config)
-        self._build_page_prognose_lkd_darstellung(config)
-        self._build_page_prognose_recalc(config)
+        def add(spec, parent):
+            text, page_key, title, children = spec
+            item = QTreeWidgetItem([text])
+            if parent is None:
+                self._tree.addTopLevelItem(item)
+            else:
+                parent.addChild(item)
+            self._item_to_page[id(item)] = (title, self._pages[page_key])
+            for child in children:
+                add(child, item)
+            if children or parent is None:
+                item.setExpanded(True)
+            return item
 
-        # ---- Baum befuellen ---------------------------------------
-        g_allgemein = QTreeWidgetItem(["Allgemein"])
-        self._tree.addTopLevelItem(g_allgemein)
-        g_allgemein.setExpanded(True)
-
-        g_quelle = QTreeWidgetItem(["Datenquelle"])
-        self._tree.addTopLevelItem(g_quelle)
-        g_quelle.setExpanded(True)
-        it_csv = QTreeWidgetItem(["CSV"])
-        it_oracle = QTreeWidgetItem(["Oracle"])
-        g_quelle.addChild(it_csv)
-        g_quelle.addChild(it_oracle)
-
-        g_prognose = QTreeWidgetItem(["Prognose"])
-        self._tree.addTopLevelItem(g_prognose)
-        g_prognose.setExpanded(True)
-        g_lkd = QTreeWidgetItem(["LKD"])
-        g_prognose.addChild(g_lkd)
-        g_lkd.setExpanded(True)
-        it_reprof = QTreeWidgetItem(["Reprofilierungs-Erkennung"])
-        it_standard = QTreeWidgetItem(["Standard-Werte"])
-        it_dar = QTreeWidgetItem(["Darstellung"])
-        g_lkd.addChild(it_reprof)
-        g_lkd.addChild(it_standard)
-        g_lkd.addChild(it_dar)
-        it_recalc = QTreeWidgetItem(["Neuberechnung"])
-        g_prognose.addChild(it_recalc)
-
-        # Pfade → page-index
-        self._item_to_page = {
-            id(g_allgemein): ("Allgemein", self._pages["general"]),
-            id(g_quelle): ("Datenquelle", self._pages["source"]),
-            id(it_csv): ("Datenquelle · CSV", self._pages["csv"]),
-            id(it_oracle): ("Datenquelle · Oracle", self._pages["oracle"]),
-            id(g_prognose): ("Prognose", self._pages["prognose_overview"]),
-            id(g_lkd): ("Prognose · LKD", self._pages["prognose_overview"]),
-            id(it_reprof): ("Prognose · LKD · Reprofilierungs-Erkennung",
-                            self._pages["prognose_reprof"]),
-            id(it_standard): ("Prognose · LKD · Standard-Werte",
-                              self._pages["prognose_standard"]),
-            id(it_dar): ("Prognose · LKD · Darstellung",
-                         self._pages["prognose_darstellung"]),
-            id(it_recalc): ("Prognose · Neuberechnung",
-                            self._pages["prognose_recalc"]),
-        }
+        first = None
+        for spec in self._TREE:
+            item = add(spec, None)
+            first = first or item
         self._tree.currentItemChanged.connect(self._on_tree_select)
-        self._tree.setCurrentItem(g_allgemein)
-
-        # ---- Button-Zeile unten -----------------------------------
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
-        root.addWidget(btns)
+        self._tree.setCurrentItem(first)
 
     # ------------------------------------------------------------------
     # Seiten-Builder — jede Seite ein kompaktes Formular
