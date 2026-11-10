@@ -42,17 +42,46 @@ def make_axis_key(
         (str(dg) if dg is not None else "").strip(),
         (str(rs) if rs is not None else "").strip(),
     ]
-    if rseinheitid is not None:
-        # Normalisieren: "17380402", "17380402.0" oder 17380402.0 muessen
-        # denselben Key-Teil ergeben. Erst in float, dann in int (ohne
-        # Nachkommastellen), dann in str — robust gegen CSV-Parser-Varianten.
-        try:
-            rid_norm = str(int(float(rseinheitid)))
-        except (TypeError, ValueError):
-            rid_norm = str(rseinheitid).strip()
-        if rid_norm:
-            parts.append(rid_norm)
+    rid_norm = normalize_rseinheitid(rseinheitid)
+    if rid_norm:
+        parts.append(rid_norm)
     return AXIS_KEY_SEP.join(parts)
+
+
+def normalize_rseinheitid(rseinheitid) -> str | None:
+    """RSEINHEITID als vergleichbarer Text: "17380402", "17380402.0" und 17380402.0
+    ergeben dasselbe. Erst in float, dann in int (ohne Nachkommastellen), dann in
+    str — robust gegen CSV-Parser-Varianten. ``None``/leer -> ``None``."""
+    if rseinheitid is None:
+        return None
+    try:
+        rid_norm = str(int(float(rseinheitid)))
+    except (TypeError, ValueError):
+        rid_norm = str(rseinheitid).strip()
+    return rid_norm or None
+
+
+def lager_canonical_positions(res2_rows) -> dict:
+    """Position (TE, DG, RS) je Lager-Achse (RSEINHEITID) aus ihrer JUENGSTEN Messung.
+
+    Eine physische Achse kann ueber die Jahre in verschiedenen Drehgestellen/Positionen
+    gesessen haben. Fuer die Prognose ist sie EINE Messreihe; ohne diese Zuordnung zerfiele
+    sie je Position in kurze Teilreihen (zu wenige Punkte fuer eine Prognose).
+    ``res2_rows``: Messzeilen (r[0..2]=TE/DG/RS-Position, r[4]=Datum, r[13]=RSEINHEITID,
+    r[16]=AUSBAU).
+    """
+    latest: dict = {}
+    for r in res2_rows:
+        if not r[16]:                      # eingebaut: Position ist der Schluessel
+            continue
+        rid = normalize_rseinheitid(r[13])
+        if rid is None:
+            continue
+        datum = r[4]
+        prev = latest.get(rid)
+        if prev is None or (datum is not None and (prev[0] is None or datum >= prev[0])):
+            latest[rid] = (datum, (r[0], r[1], r[2]))
+    return {rid: pos for rid, (_d, pos) in latest.items()}
 
 
 def parse_axis_key(key: str) -> Tuple[str, str, str]:

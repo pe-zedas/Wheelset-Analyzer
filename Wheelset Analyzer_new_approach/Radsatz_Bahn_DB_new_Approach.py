@@ -43,13 +43,16 @@ from radsatz_settings import (
     PROGNOSIS_METHOD_THEIL_SEN,
     axis_key_matches_debug,
     load_radsatz_config,
+    overrides_from_argv,
 )
 from radsatz_axis_labels import (
     axis_identity_from_vehicle,
     axis_matches_plot_filter,
     axis_plot_file_slug,
     format_axis_plot_title,
+    lager_canonical_positions,
     make_axis_key,
+    normalize_rseinheitid,
     sync_axis_labels_from_measurement_row,
     write_plot_manifest,
 )
@@ -57,7 +60,8 @@ from radsatz_csv_io import load_bo_radsatz_from_csv
 
 # ── Basis-Config laden (gemeinsam mit bisherigem Programm) ─────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-cfg = load_radsatz_config(SCRIPT_DIR)
+INI_OVERRIDES = overrides_from_argv()          # --set abschnitt.schluessel=wert
+cfg = load_radsatz_config(SCRIPT_DIR, overrides=INI_OVERRIDES)
 
 # Backend VOR pyplot (PyQt5 wirkt nur so; sonst bleibt Windows oft bei TkAgg).
 from radsatz_matplotlib import configure_matplotlib_backend
@@ -108,6 +112,8 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logging.info("=== Radsatz_Bahn_DB_new_Approach gestartet ===")
+if INI_OVERRIDES:
+    logging.info("INI-Werte per Kommandozeile ueberschrieben: %s", INI_OVERRIDES)
 logging.info("Matplotlib-Backend: %s", MPL_BACKEND)
 logging.info("Prognosemethode(n) (ini): %s", ", ".join(cfg.prognosis_methods))
 
@@ -1101,15 +1107,20 @@ def main() -> None:
     # beiden Felder werden fuer den eindeutigen Schluessel von Lagerachsen
     # gebraucht. Alte 3-Spalten-Rueckgaben (CSV-Fallback) bleiben kompatibel,
     # weil wir defensiv per Index zugreifen.
+    # Lager-Achsen: EINE physische Achse (RSEINHEITID) = EINE Reihe, auch wenn sie ueber
+    # die Jahre in verschiedenen Drehgestellen/Positionen sass. Position = die der
+    # juengsten Messung (siehe lager_canonical_positions).
+    lager_pos = lager_canonical_positions(res2)
     dict_VehicleAxis = {}
     for strVehicle in sorted(res1, key=_vehicle_axis_sort_key):
         rseinheitid = strVehicle[3] if len(strVehicle) > 3 else None
-        key = make_axis_key(
-            strVehicle[0], strVehicle[1], strVehicle[2],
-            rseinheitid=rseinheitid,
-        )
+        te_k, dg_k, rs_k = strVehicle[0], strVehicle[1], strVehicle[2]
+        if rseinheitid is not None:
+            te_k, dg_k, rs_k = lager_pos.get(
+                normalize_rseinheitid(rseinheitid), (te_k, dg_k, rs_k))
+        key = make_axis_key(te_k, dg_k, rs_k, rseinheitid=rseinheitid)
         dict_VehicleAxis[key] = VehicleAxis(
-            strVehicle[0], strVehicle[1], strVehicle[2],
+            te_k, dg_k, rs_k,
             MeterList([], [], [], [], [], [], []),
             MeterList([], [], [], [], [], [], []),
         )
@@ -1126,9 +1137,11 @@ def main() -> None:
             # Lagerachsen an derselben Position NICHT vermischt werden.
             for r in res2:
                 rid_for_key = r[13] if r[16] else None   # None = eingebaut
-                axis_key = make_axis_key(
-                    r[0], r[1], r[2], rseinheitid=rid_for_key
-                )
+                te_k, dg_k, rs_k = r[0], r[1], r[2]
+                if rid_for_key is not None:
+                    te_k, dg_k, rs_k = lager_pos.get(
+                        normalize_rseinheitid(rid_for_key), (te_k, dg_k, rs_k))
+                axis_key = make_axis_key(te_k, dg_k, rs_k, rseinheitid=rid_for_key)
                 tVehicle = dict_VehicleAxis.get(axis_key)
                 if tVehicle is None:
                     logging.warning(

@@ -1,6 +1,6 @@
 # Programmdokumentation: Radsatz_Bahn_DB_new_Approach.py
 
-Stand: 2026-11-05, Rev. 6 (Prognose für Lagerkomponenten; Reprof-Lernen mit IQR und stabiler Sortierung; Simulation bis MIN)  
+Stand: 2026-11-10, Rev. 7 (Lager-Achse über Positionen hinweg als eine Reihe; Rev. 6: Prognose für Lagerkomponenten; Reprof-Lernen mit IQR und stabiler Sortierung; Simulation bis MIN)  
 Autor: Peter Engel  
 Basis: `doc/Neuer_Ansatz_Radsatz_Analyse_Prognose_CL.md`
 
@@ -1327,7 +1327,9 @@ liest sie dort und hängt sie über `RSEINHEITID` an die Lager-Räder.
   Zusatzparameter `rseinheitid`). Damit gilt für eine Ausbaupositon
   (z. B. `C0402 Losradachse 1`) jede physische Achse als eigener
   Lauf, so dass das Dashboard beide — eingebautes Rad und das vorher
-  dort montierte Lagerrad — korrekt getrennt sieht.
+  dort montierte Lagerrad — korrekt getrennt sieht. Seit Rev. 7 ist
+  eine Lager-Achse außerdem **eine** Reihe, auch wenn sie in
+  verschiedenen Drehgestellen saß (siehe 13.10).
 
 - **Zyklus-Erkennung**: positive LKD-Sprünge (Radwechsel) werden über
   `toolsWheelset.getPositiveJumpIndices` identifiziert. Der Fit nutzt
@@ -1376,6 +1378,63 @@ liest sie dort und hängt sie über `RSEINHEITID` an die Lager-Räder.
   (`use_database = false`, `[paths] csv_bo_radsatzdaten`). Das
   Ergebnis landet in `bo_radsatzdaten_prognose_recalc.csv` und hat
   dieselbe Spaltenstruktur wie die DB-Tabelle.
+
+### 13.10 Lager-Achse über Positionen hinweg als eine Reihe (Rev. 7)
+
+**Stand: 2026-11-10.** Eine ausgebaute Achse kann über die Jahre in
+verschiedenen Drehgestellen/Positionen gesessen haben. Der Schlüssel
+bestand bisher aus Einheit, Drehgestell-Position, Radsatz-Position und
+`RSEINHEITID`; dieselbe physische Achse zerfiel damit je Position in
+Teilreihen. Waren diese kurz (z. B. 3 + 3 Messpunkte), unterschritten
+sie die Mindestpunktzahl (`min_points_fit`; die Kreuzvalidierung
+`cv_tune = true` wählt 4) und bekamen **keine Prognose**
+(Beispiel: Drehgestell `s SLGx / 176320`).
+
+- **Änderung:** Für Lager-Zeilen (`AUSBAU` gefüllt) wird die Position
+  (TE, DG, RS) im Schlüssel durch die der **jüngsten Messung** der Achse
+  ersetzt (`radsatz_axis_labels.lager_canonical_positions`); ein Lager-
+  Rad ist damit über `RSEINHEITID` eindeutig, eine Reihe je Achse. Die
+  Beschriftungen kommen wie bisher von der letzten Messzeile. Gilt für
+  Oracle- und CSV-Modus (gemeinsamer Code im Hauptskript). Neu:
+  `normalize_rseinheitid` (vorher inline in `make_axis_key`).
+- **Wirkung (geprüft an einer Kopie im CSV-Modus, `cv_tune = true`):**
+  81 statt 79 Lager-Radsätze mit Prognose; `176320` (2 Radsätze) wird
+  berechnet, keine Prognose entfällt. Zwei Läufe des unveränderten Codes
+  waren identisch (deterministisch); die Unterschiede stammen also von der
+  Änderung.
+- **Veränderte Werte bei zusammengeführten Achsen** (mehr Punkte je
+  Reihe): `176303` (Grenzdatum ca. +42 Tage), `176413-S` (ein
+  sinnloses Grenzdatum 2005 vor allen Messungen entfällt).
+- **Nebenwirkung:** Das Lernen der Reprof-Parameter
+  (`reprof_learning._median_reprof_params`: Median der erfolgreich
+  gelernten Achsen als Fallback) sieht die zusammengeführten Achsen und
+  verschiebt sich geringfügig. Dadurch ändern sich Werte einzelner
+  Achsen, deren Messdaten gleich blieben: 6 Lager-Radsätze (`176412-S`,
+  `176475`, `185425 V-7` und `176489` mit Grenzdatum ca. +219 Tage) und
+  1 eingebaute Achse (`FLIRT 102` Triebdrehgestell 2 Treibradsatz 2,
+  +1 Tag). Bewusst in Kauf genommen (Variante 1); die Alternative
+  wäre, das Lernen auf den bisherigen getrennten Reihen zu lassen.
+- Die Prognose-Tabelle wird erst mit dem nächsten Lauf gegen die
+  Datenbank neu geschrieben (Dashboard: „Prognose neu berechnen“).
+
+### 13.11 INI-Werte per Kommandozeile überschreiben (Rev. 7)
+
+Jeder Wert aus `radsatz_config.ini` lässt sich beim Start mit
+`--set abschnitt.schluessel=wert` (mehrfach möglich) überschreiben, ohne die
+Datei zu ändern, z. B.
+
+```
+python Radsatz_Bahn_DB_new_Approach.py --set plot.show_plot=false --set pipeline.use_database=false
+```
+
+(`radsatz_settings.overrides_from_argv`, `load_radsatz_config(…, overrides)`).
+Fehlerhafte Angaben brechen mit einer Meldung ab, andere Argumente werden
+ignoriert. Das Dashboard nutzt das für „Prognose neu berechnen“:
+`pipeline.use_database` (Oracle/CSV), `pipeline.write_prog_data=true`,
+`plot.show_plot=false`, `plot.plot_show_window=false`. Ohne die
+Plot-Überschreibung bliebe ein Lauf ohne Oberfläche an einem Plotfenster
+hängen (bis zum Zeitlimit von 30 Minuten). Die INI wird vom Dashboard nicht mehr
+verändert.
 
 ---
 

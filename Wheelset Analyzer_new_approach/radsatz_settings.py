@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import argparse
 import configparser
 import os
 import re
+import sys
 from dataclasses import dataclass
-from typing import Any, List, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 CONFIG_BASENAME = "radsatz_config.ini"
@@ -171,11 +173,41 @@ class RadsatzConfig:
     progn_new_baureihe_fallback: bool
 
 
-def load_radsatz_config(script_dir: str) -> RadsatzConfig:
+def overrides_from_argv(argv: Optional[Sequence[str]] = None) -> Dict[str, str]:
+    """INI-Ueberschreibungen aus der Kommandozeile: ``--set abschnitt.schluessel=wert``
+    (mehrfach moeglich), z. B. ``--set plot.show_plot=false``.
+
+    Sie haben Vorrang vor ``radsatz_config.ini``, ohne die Datei zu aendern. Unbekannte
+    andere Argumente werden ignoriert (das Skript kann auch importiert werden).
+    """
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--set", dest="items", action="append", default=[],
+                        metavar="ABSCHNITT.SCHLUESSEL=WERT")
+    ns, _unknown = parser.parse_known_args(list(sys.argv[1:] if argv is None else argv))
+    out: Dict[str, str] = {}
+    for item in ns.items:
+        name, sep, value = item.partition("=")
+        section, dot, key = name.strip().partition(".")
+        if not (sep and dot and section and key):
+            raise SystemExit(
+                f"Ungueltige Ueberschreibung '{item}': erwartet --set abschnitt.schluessel=wert")
+        out[f"{section}.{key.strip()}"] = value.strip()
+    return out
+
+
+def load_radsatz_config(script_dir: str,
+                        overrides: Optional[Dict[str, str]] = None) -> RadsatzConfig:
+    """Liest ``radsatz_config.ini``. ``overrides`` (``{"abschnitt.schluessel": "wert"}``,
+    siehe :func:`overrides_from_argv`) gelten vor den Werten der Datei."""
     ini_path = os.path.join(script_dir, CONFIG_BASENAME)
     cp = configparser.ConfigParser()
     if os.path.isfile(ini_path):
         cp.read(ini_path, encoding="utf-8")
+    for dotted, value in (overrides or {}).items():
+        section, _, key = dotted.partition(".")
+        if not cp.has_section(section):
+            cp.add_section(section)
+        cp.set(section, key, value.replace("%", "%%"))
 
     def opt(section: str, key: str, default: str) -> str:
         if cp.has_option(section, key):
