@@ -2,16 +2,19 @@
 
 Das eigentliche Rechnen liegt im Nachbar-Projekt
 ``Wheelset Analyzer_new_approach/Radsatz_Bahn_DB_new_Approach.py``.
-Dieses Modul passt dessen INI-Datei an den aktuellen Dashboard-Modus an
-(``[pipeline] use_database`` wird auf ``true`` fuer Oracle und ``false``
-fuer CSV gesetzt; ``write_prog_data`` wird auf ``true`` gezwungen) und
-startet das Skript als Subprozess mit demselben Python-Interpreter.
+Dieses Modul startet das Skript als Subprozess mit demselben Python-Interpreter
+und uebergibt die Werte, die fuer den Dashboard-Lauf gelten, per Kommandozeile
+(``--set abschnitt.schluessel=wert``). Sie haben Vorrang vor
+``radsatz_config.ini``; die Datei selbst wird **nicht** veraendert:
+
+* ``pipeline.use_database``: ``true`` fuer Oracle, ``false`` fuer CSV
+* ``pipeline.write_prog_data``: immer ``true``
+* ``plot.show_plot`` / ``plot.plot_show_window``: immer ``false`` — der Lauf hat
+  keine Oberflaeche, ein Plotfenster wuerde ihn bis zum Zeitlimit blockieren
 """
 from __future__ import annotations
 
-import configparser
 import logging
-import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -51,31 +54,18 @@ def _resolve_backend_dir() -> Path:
     )
 
 
-def _patch_ini(ini_path: Path, use_database: bool) -> None:
-    """Setzt [pipeline] use_database und write_prog_data passend.
-
-    Die INI wird nur geaendert, wenn noetig (idempotent). Eine
-    Backup-Datei ``radsatz_config.ini.bak`` wird einmal angelegt, falls
-    noch keine existiert."""
-    cp = configparser.ConfigParser()
-    cp.read(ini_path, encoding="utf-8")
-    if "pipeline" not in cp:
-        cp["pipeline"] = {}
-    desired_use_db = "true" if use_database else "false"
-    changed = False
-    if cp["pipeline"].get("use_database", "").strip().lower() != desired_use_db:
-        cp["pipeline"]["use_database"] = desired_use_db
-        changed = True
-    if cp["pipeline"].get("write_prog_data", "").strip().lower() != "true":
-        cp["pipeline"]["write_prog_data"] = "true"
-        changed = True
-    if not changed:
-        return
-    backup = ini_path.with_suffix(".ini.bak")
-    if not backup.exists():
-        shutil.copy2(ini_path, backup)
-    with ini_path.open("w", encoding="utf-8") as f:
-        cp.write(f)
+def backend_overrides(use_database: bool) -> list:
+    """Kommandozeilen-Argumente, die die INI-Werte fuer einen Dashboard-Lauf ueberschreiben."""
+    values = {
+        "pipeline.use_database": "true" if use_database else "false",
+        "pipeline.write_prog_data": "true",
+        "plot.show_plot": "false",
+        "plot.plot_show_window": "false",
+    }
+    args: list = []
+    for dotted, value in values.items():
+        args += ["--set", f"{dotted}={value}"]
+    return args
 
 
 def run_backend_prognose(
@@ -93,13 +83,7 @@ def run_backend_prognose(
     if not ini.exists():
         return BackendResult(False, -1, "", "",
                              None, f"INI-Datei fehlt: {ini}")
-    try:
-        _patch_ini(ini, use_database=use_database)
-    except Exception as exc:
-        return BackendResult(False, -1, "", str(exc),
-                             None, f"INI konnte nicht angepasst werden: {exc}")
-
-    cmd = [sys.executable, "-u", _SCRIPT_NAME]
+    cmd = [sys.executable, "-u", _SCRIPT_NAME, *backend_overrides(use_database)]
     log.info("Backend-Prognose-Lauf: %s (cwd=%s, use_db=%s)",
              " ".join(cmd), bdir, use_database)
     try:

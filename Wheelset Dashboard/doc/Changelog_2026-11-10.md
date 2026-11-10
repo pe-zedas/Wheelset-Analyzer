@@ -354,10 +354,46 @@ Ziel: weniger doppelter Code, klarere Schichten, kürzere Funktionen — **ohne 
   X-Achsen) alt gegen neu: **0 Abweichungen**.
 - `collect_gantt_entries`: alle Gruppen alt gegen neu bei eingefrorener Uhr: VGF 72, Abellio 653, **0 Abweichungen**.
 
+## 19. Backend: Lager-Achse über Positionen hinweg als eine Reihe
+
+Dateien (Backend `Wheelset Analyzer_new_approach`): `radsatz_axis_labels.py`,
+`Radsatz_Bahn_DB_new_Approach.py`; Doku `Programm_Doku_new_Approach.md` Rev. 7 (13.10).
+
+**Anlass:** Für das VGF-Drehgestell `s SLGx / 176320` gab es keine Prognose. Dieselbe Achse saß bis 2013
+in Laufdrehgestell 2 und danach in Laufdrehgestell 1; das Backend führte sie deshalb als zwei Reihen mit
+je 3 Messpunkten, und die Mindestpunktzahl (Kreuzvalidierung wählt 4) war nicht erreicht.
+
+**Änderung:** Eine Lager-Achse wird über ihre `RSEINHEITID` geführt, ihre Position ist die der jüngsten
+Messung. Ergebnis an einer Kopie: 81 statt 79 Lager-Radsätze mit Prognose, `176320` wird berechnet.
+**Nebenwirkung** (siehe Backend-Doku 13.10): Einzelne Werte weiterer Achsen verschieben sich geringfügig,
+da das Reprof-Lernen die zusammengeführten Achsen sieht (6 Lager-Radsätze, 1 eingebaute Achse;
+größter Ausschlag `176489` mit ca. +219 Tage beim Grenzdatum). Wirksam wird die Änderung in der Datenbank
+erst mit dem nächsten Backend-Lauf („Prognose neu berechnen“).
+
+
+## 20. „Prognose neu berechnen“: INI-Werte per Kommandozeile statt INI umschreiben
+
+Dateien: Backend `radsatz_settings.py`, `Radsatz_Bahn_DB_new_Approach.py` (Doku 13.11); Dashboard
+`logic/backend_runner.py`, `tests/test_backend_runner.py`.
+
+**Anlass:** Ob beim Lauf aus dem Dashboard Plotfenster erscheinen, hing allein von `radsatz_config.ini`
+ab (`show_plot`/`plot_show_window`). Stand beides auf `true`, hing der Lauf an einem Fenster, bis das
+Zeitlimit (30 min) ihn abbrach.
+
+**Umsetzung:** Das Backend nimmt `--set abschnitt.schluessel=wert` entgegen (Vorrang vor der INI). Das
+Dashboard übergibt `pipeline.use_database`, `pipeline.write_prog_data=true`, `plot.show_plot=false`,
+`plot.plot_show_window=false`. Die INI wird **nicht mehr verändert** (früher wurden `use_database` und
+`write_prog_data` in die Datei geschrieben und eine `.ini.bak` angelegt).
+
+**Prüfung:** Backend-Kopie mit `show_plot = plot_show_window = true` in der INI, Lauf über
+`run_backend_prognose`: erfolgreich nach 10 s, INI danach byte-gleich. Derselbe Lauf ohne Plot-Überschreibung
+bleibt an einem Fenster hängen. 15 neue Tests (Befehlszeile, INI unverändert, Fehlerfälle, Vorrang vor der INI).
+
+
 ## Tests
 
 `tests/test_abellio_profile.py` (33 Fälle): Namensvarianten inkl. des
 Laufradsatz-Falls, Nullwerte, kollidierende Drehgestelle, Einheit ohne
 Struktur, Toleranzbereiche als Grenzwerte, nicht zuordenbare Lager-Zeilen und
-dass VGF unverändert bleibt. `tests/test_donut_counts.py` (4 Fälle) sichert die Donut-Zählung, `tests/test_mob_profile.py` (23 Fälle) das MOB-Profil (echte Bezeichnungen, Messpositionen, unvollständige Termine, Lager, Drehgestell-Wechsel), `tests/test_lager_reinstalled.py` (5 Fälle) das Ausblenden wieder eingebauter Komponenten. Gesamt 171 Tests grün (neu: `test_smoke_profiles.py` 15 Fälle, `test_background_loading.py` 9, `test_aggregation.py` 10, `test_app_paths.py` 16, `test_repository.py` 7, `test_achse_view_controls.py` 6, `test_messdaten_icon.py` 8, `test_structure.py` 19, `test_perf.py` 5); zusätzlich ein
+dass VGF unverändert bleibt. `tests/test_donut_counts.py` (4 Fälle) sichert die Donut-Zählung, `tests/test_mob_profile.py` (23 Fälle) das MOB-Profil (echte Bezeichnungen, Messpositionen, unvollständige Termine, Lager, Drehgestell-Wechsel), `tests/test_lager_reinstalled.py` (5 Fälle) das Ausblenden wieder eingebauter Komponenten. Gesamt 186 Tests grün (neu: `test_smoke_profiles.py` 15 Fälle, `test_background_loading.py` 9, `test_aggregation.py` 10, `test_app_paths.py` 16, `test_repository.py` 7, `test_achse_view_controls.py` 6, `test_messdaten_icon.py` 8, `test_structure.py` 19, `test_perf.py` 5, `test_backend_runner.py` 15); zusätzlich ein
 Strukturvergleich VGF vor/nach der Änderung (identischer Fingerabdruck).
