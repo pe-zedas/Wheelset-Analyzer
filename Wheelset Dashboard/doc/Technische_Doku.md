@@ -55,6 +55,7 @@ Wheelset Dashboard/
 │       ├── views/              # Ansichten: common (Basis, Zellen), flotte, einheit, drehgestell, achse, lager
 │       ├── overview_widgets.py # DonutCanvas + GanttCanvas
 │       ├── plot_widget.py      # PlotCanvas für Detail-Plots
+│       ├── time_axis.py        # Zeitachse mit Sprung zum aktuellen Datum (Locator/Formatter)
 │       └── style.qss           # Light-Theme-Stylesheet
 ├── tests/                       # pytest (Datenregeln, Aggregation, Smoke je Profil, Laden im Hintergrund)
 ├── tools/                       # Entwickler-Hilfsprogramme: smoketest, oracle_e2e (python -m tools.<name>)

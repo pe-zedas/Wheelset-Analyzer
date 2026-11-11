@@ -1,6 +1,7 @@
 """Hauptfenster mit Side-Nav, Breadcrumb und Stacked-Views."""
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 from datetime import datetime
@@ -231,6 +232,7 @@ class MainWindow(QMainWindow):
         # drilldown signals verbinden (Flotte und Einheit fest)
         self._view_flotte.drilldown.connect(self.navigate)
         self._view_einheit.drilldown.connect(self.navigate)
+        self._view_achse.time_jump_changed.connect(self._on_time_jump_changed)
         # DG- und Achse-drilldown werden je nach Kontext umgeschaltet (Flotte vs. Lager)
         self._set_dg_drilldown_mode("flotte")
         self._set_achse_drilldown_mode("flotte")
@@ -755,6 +757,10 @@ class MainWindow(QMainWindow):
 
     # ------------------- settings -----------------------
 
+    def _on_time_jump_changed(self, on: bool):
+        """Schalter im Diagramm umgestellt: Stand merken (Einstellungsdialog, naechste Diagramme)."""
+        self._prog_cfg = dataclasses.replace(self._prog_cfg, time_jump=bool(on))
+
     def open_settings(self):
         cfg = {
             "profile": self._repo.profile.name,
@@ -765,10 +771,14 @@ class MainWindow(QMainWindow):
             "oracle_user": self._repo.config.oracle_user or "",
             "oracle_password": self._repo.config.oracle_password or "",
             "refresh_min": "15",
+            "p_time_jump": self._prog_cfg.time_jump,
         }
         dlg = SettingsDialog(cfg, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             new = dlg.get_config()
+            # Darstellung: gilt sofort (auch im geoeffneten Diagramm), nicht gespeichert
+            self._prog_cfg = dataclasses.replace(self._prog_cfg, time_jump=bool(new["p_time_jump"]))
+            self._view_achse.set_prognose_config(self._prog_cfg)
             new_repo_cfg = RepositoryConfig(
                 profile_name=new["profile"],
                 source=new["source"],

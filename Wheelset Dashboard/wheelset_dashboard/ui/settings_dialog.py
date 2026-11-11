@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QSplitter, QStackedWidget, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
@@ -28,6 +28,7 @@ class SettingsDialog(QDialog):
             ("CSV", "csv", "Datenquelle · CSV", ()),
             ("Oracle", "oracle", "Datenquelle · Oracle", ()),
         )),
+        ("Darstellung", "darstellung", "Darstellung", ()),
         ("Prognose", "prognose_overview", "Prognose", (
             ("Neuberechnung", "prognose_recalc", "Prognose · Neuberechnung", ()),
         )),
@@ -51,6 +52,7 @@ class SettingsDialog(QDialog):
         self._build_page_source(config)
         self._build_page_csv(config)
         self._build_page_oracle(config)
+        self._build_page_darstellung(config)
         self._build_page_prognose_recalc(config)
         self._build_tree()
 
@@ -229,6 +231,20 @@ class SettingsDialog(QDialog):
                 or self.oracle_pw.text()):
             self._load_oracle_for_profile(self.profile.currentText())
 
+    def _build_page_darstellung(self, config: dict):
+        form = self._new_page(
+            "darstellung",
+            "Die Prognose haengt am letzten Messwert. Liegt er Jahre zurueck, steht sie im "
+            "Diagramm in der Vergangenheit. Mit dieser Einstellung bleibt die Zeitachse durchgehend, "
+            "zeigt aber ab dem ersten Prognosewert das um den Abstand zu heute verschobene Datum "
+            "(senkrechte Linie \"heute\"). Wirkt nur bei X-Achse \"Datum\" und wenn der letzte "
+            "Messwert mehr als 90 Tage zurueckliegt. Im Diagramm laesst sich die Darstellung "
+            "mit demselben Schalter umstellen. Die Einstellung gilt, bis das Programm beendet wird."
+        )
+        self.p_time_jump = QCheckBox("Zeitachse mit Prognose ab heute")
+        self.p_time_jump.setChecked(bool(config.get("p_time_jump", False)))
+        form.addRow("Zeitachse", self.p_time_jump)
+
     def _build_page_prognose_recalc(self, config: dict):
         form = self._new_page(
             "prognose_recalc",
@@ -317,6 +333,7 @@ class SettingsDialog(QDialog):
             "oracle_user": self.oracle_user.text(),
             "oracle_password": self.oracle_pw.text(),
             "refresh_min": self.refresh_min.currentText(),
+            "p_time_jump": self.p_time_jump.isChecked(),
         }
 
 

@@ -73,7 +73,7 @@ wheelset_dashboard/
             csv_source, oracle_source, repository
   logic/    status, lager_state, aggregation (Kennzahlen für die Ansichten), export, backend_runner, prognose
   ui/       main_window, jobs (Hintergrund-Aufgaben), views/ (Flotte, Einheit, Drehgestell, Achse, Lager),
-            plot_widget, overview_widgets, settings_dialog
+            plot_widget, time_axis (Zeitachse mit Sprung), overview_widgets, settings_dialog
   perf.py   Zeitmesser für die DEBUG-Logs
 tests/      pytest        tools/   Entwickler-Hilfsprogramme        doc/   Dokumentation
 ```

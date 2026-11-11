@@ -110,7 +110,7 @@ Spalten (links nach rechts): Status · Typ · Bezeichnung · letzte Einheit · A
 - **Gestrichelte Fortsetzung** = LKD-Prognose bis zum Grenzwert.
 - **Vertikale Linien** = heute (blau), Warn-Termin (gelb), Grenz-Termin (rot).
 - **Legende** oben rechts.
-- Die KPI „LKD left/right (letzter)" nutzt den chronologisch jüngsten Messpunkt — unabhängig von der CSV-Zeilenreihenfolge.
+- Die KPI „LKD left/right (letzter)" nutzt den chronologisch jüngsten Messpunkt — unabhängig von der CSV-Zeilenreihenfolge. Unter dem Wert steht das Datum dieser Messung („Messung JJJJ-MM-TT“).
 
 ### 4.8 Werkstattliste exportieren
 

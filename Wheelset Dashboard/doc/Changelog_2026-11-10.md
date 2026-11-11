@@ -412,10 +412,46 @@ weiter ein optionales 90-%-KI-Band; es ist nicht umgesetzt. Ein Band bräuchte d
 Backend (zusätzliche Spalten in `BO_RADSATZDATEN_PROGNOSE`).
 
 
+## 22. Optional: Zeitachse mit Sprung zum aktuellen Datum
+
+Dateien: `ui/time_axis.py` (neu), `ui/plot_widget.py`, `ui/settings_dialog.py`, `ui/main_window.py`,
+`ui/views/achse.py` (`redraw()`), `data/models.py` (`PrognoseConfig.time_jump`), `tests/test_time_axis.py`,
+`tests/test_settings_dialog.py`, `doc/Anwenderhandbuch.md`.
+
+Anlass: Im Achsen-Diagramm liegen die letzten Messwerte oft Jahre zurück; die Prognose schließt sich direkt
+an und steht damit in der Vergangenheit, während Kacheln und Gantt die Termine auf „heute“ verschieben
+(`faelligkeit_shift`).
+
+Umsetzung (neue Einstellungsseite *Darstellung*, Standard **aus**, nicht gespeichert): Das Diagramm bleibt
+unverändert (eine durchgehende Achse, gleicher Maßstab, Prognose am Verlauf). Nur die **Beschriftung** der
+Zeitachse ändert sich: links vom Übergang (letzter Messwert) echte Daten, rechts davon das um den Abstand
+zu heute verschobene Datum. Am Übergang steht eine senkrechte Linie mit der Überschrift „heute (Datum)“
+über der Achse (links der Linie, wenn sie im rechten Teil liegt, damit die Legende sie nie verdeckt);
+das Wort „heute“ steht nicht an der Achse. Die Marken liegen auf runden Zeitpunkten (Jahresmarken am
+1. Januar, Monatsmarken an Vielfachen des Intervalls) und werden bei jedem Zeichnen neu berechnet. Alle
+Marken mit Text bleiben sichtbar; nur wenn sich die letzte linke und die erste rechte Marke berühren würden
+(< 56 px), entfällt die linke. Wirkt nur bei X-Achse „Datum“, mit gezeichneter Prognose und wenn der letzte
+Messwert mehr als 90 Tage zurückliegt. Bei ausgeschalteter Option läuft derselbe Code wie vorher
+(die bisherige Heute-Linie bleibt); die Linien und Achsengrenzen sind mit der Option an identisch.
+
+Schalter im Diagramm: In der Steuerleiste des Achsen-Diagramms (neben X-Achse und Rad) steht die Checkbox
+„Zeitachse mit Prognose ab heute“. Sie stellt sofort um und meldet den Stand (`time_jump_changed`)
+an das Hauptfenster, das ihn in `PrognoseConfig.time_jump` merkt; Einstellungsdialog und weitere Diagramme
+übernehmen ihn. Der Schalter hat Vorrang vor der Konfiguration (`AchseView._effective_config`), ist bei
+X-Achse „Laufleistung“ gesperrt und erklärt im Tooltip, wenn er keine Wirkung hat (keine Prognose oder letzter
+Messwert höchstens 90 Tage zurück; Hilfsattribut `PlotCanvas.time_jump_active`). Das Achsen-Diagramm ist das
+einzige Diagramm der Anwendung.
+
+Kachel „letzter Messwert“ im Achsen-Diagramm: zeigt unter dem Wert das Datum der Messung („Messung JJJJ-MM-TT“,
+`AchseView._cards_for`). Beschriftung von Schalter und Einstellung: „Zeitachse mit Prognose ab heute“.
+
+Bewusst nicht umgesetzt: Speichern der Einstellung (erst prüfen, ob die Darstellung als Standard taugt).
+
+
 ## Tests
 
 `tests/test_abellio_profile.py` (33 Fälle): Namensvarianten inkl. des
 Laufradsatz-Falls, Nullwerte, kollidierende Drehgestelle, Einheit ohne
 Struktur, Toleranzbereiche als Grenzwerte, nicht zuordenbare Lager-Zeilen und
-dass VGF unverändert bleibt. `tests/test_donut_counts.py` (4 Fälle) sichert die Donut-Zählung, `tests/test_mob_profile.py` (23 Fälle) das MOB-Profil (echte Bezeichnungen, Messpositionen, unvollständige Termine, Lager, Drehgestell-Wechsel), `tests/test_lager_reinstalled.py` (5 Fälle) das Ausblenden wieder eingebauter Komponenten. Gesamt 192 Tests grün (neu: `test_smoke_profiles.py` 15 Fälle, `test_background_loading.py` 9, `test_aggregation.py` 10, `test_app_paths.py` 16, `test_repository.py` 7, `test_achse_view_controls.py` 6, `test_messdaten_icon.py` 8, `test_structure.py` 19, `test_perf.py` 5, `test_backend_runner.py` 15, `test_settings_dialog.py` 6); zusätzlich ein
+dass VGF unverändert bleibt. `tests/test_donut_counts.py` (4 Fälle) sichert die Donut-Zählung, `tests/test_mob_profile.py` (23 Fälle) das MOB-Profil (echte Bezeichnungen, Messpositionen, unvollständige Termine, Lager, Drehgestell-Wechsel), `tests/test_lager_reinstalled.py` (5 Fälle) das Ausblenden wieder eingebauter Komponenten. Gesamt 212 Tests grün (neu: `test_time_axis.py` 19 Fälle, `test_smoke_profiles.py` 15 Fälle, `test_background_loading.py` 9, `test_aggregation.py` 10, `test_app_paths.py` 16, `test_repository.py` 7, `test_achse_view_controls.py` 6, `test_messdaten_icon.py` 8, `test_structure.py` 19, `test_perf.py` 5, `test_backend_runner.py` 15, `test_settings_dialog.py` 7); zusätzlich ein
 Strukturvergleich VGF vor/nach der Änderung (identischer Fingerabdruck).

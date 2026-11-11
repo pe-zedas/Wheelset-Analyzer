@@ -27,7 +27,7 @@ def _baum(dlg):
 
 def test_baum_enthaelt_nur_noch_wirksame_abschnitte():
     dlg = SettingsDialog(dict(CONFIG))
-    assert _baum(dlg) == ["Allgemein", "Datenquelle", "CSV", "Oracle", "Prognose", "Neuberechnung"]
+    assert _baum(dlg) == ["Allgemein", "Datenquelle", "CSV", "Oracle", "Darstellung", "Prognose", "Neuberechnung"]
 
 
 def test_keine_wirkungslosen_prognose_einstellungen():
@@ -43,7 +43,7 @@ def test_keine_wirkungslosen_prognose_einstellungen():
 def test_get_config_liefert_genau_die_felder_des_hauptfensters():
     assert set(SettingsDialog(dict(CONFIG)).get_config()) == {
         "profile", "source", "csv_raw", "csv_prognose", "oracle_dsn", "oracle_user", "oracle_password",
-        "refresh_min"}
+        "refresh_min", "p_time_jump"}
 
 
 def test_alte_konfiguration_mit_entfernten_schluesseln_stoert_nicht():
@@ -54,7 +54,7 @@ def test_alte_konfiguration_mit_entfernten_schluesseln_stoert_nicht():
 def test_prognose_knoten_zeigt_die_neuberechnung():
     dlg = SettingsDialog(dict(CONFIG))
     assert dlg._pages["prognose_overview"] == dlg._pages["prognose_recalc"]
-    dlg._tree.setCurrentItem(dlg._tree.topLevelItem(2))              # "Prognose"
+    dlg._tree.setCurrentItem(dlg._tree.topLevelItem(3))              # "Prognose"
     assert dlg._stack.currentIndex() == dlg._pages["prognose_recalc"]
     assert dlg._page_header.text() == "Prognose"
 
@@ -63,3 +63,11 @@ def test_neuberechnung_setzt_flag_und_nimmt_den_dialog_an():
     dlg = SettingsDialog(dict(CONFIG))
     dlg._on_recalc_clicked()
     assert dlg.recalc_requested and dlg.result() == dlg.DialogCode.Accepted
+
+
+def test_darstellung_zeitachse_standard_aus_und_uebernimmt_wert():
+    dlg = SettingsDialog(dict(CONFIG))
+    assert dlg.get_config()["p_time_jump"] is False
+    dlg.p_time_jump.setChecked(True)
+    assert dlg.get_config()["p_time_jump"] is True
+    assert SettingsDialog({**CONFIG, "p_time_jump": True}).p_time_jump.isChecked()

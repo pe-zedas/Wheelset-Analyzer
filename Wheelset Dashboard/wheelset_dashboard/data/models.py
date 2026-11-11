@@ -226,6 +226,8 @@ class PrognoseConfig:
     # Verhalten
     auto_from_history: bool = True
     show_reprof_steps: bool = True
+    # Darstellung: Zeitachse ab Prognosebeginn auf das aktuelle Datum verschoben (ui/time_axis.py)
+    time_jump: bool = False
 
 
 @dataclass

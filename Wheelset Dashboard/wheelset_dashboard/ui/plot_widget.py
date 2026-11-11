@@ -1,6 +1,7 @@
 """Matplotlib-Canvas (Qt-eingebettet) fuer das Dashboard."""
 from __future__ import annotations
 
+from datetime import datetime
 from typing import List, Optional, Tuple
 
 import matplotlib
@@ -14,6 +15,7 @@ from matplotlib.ticker import FuncFormatter
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from ..data.models import PrognosePunkt
+from .time_axis import ShiftedDateFormatter, ShiftedDateLocator
 
 
 # Farbkonventionen (aus PRD F-UI-2):
@@ -23,6 +25,9 @@ COL_UNSPEC = "#444441"
 COL_WARN = "#F2B82B"   # synchron zu AMPEL_COLORS[YELLOW] in widgets.py
 COL_GRENZ = "#E24B4A"
 COL_TODAY = "#6B6F78"
+
+# Zeitachse mit Sprung: erst wenn der letzte Messwert so viele Tage zurueckliegt
+TIME_JUMP_MIN_DAYS = 90
 
 
 SIDE_COLORS = {
@@ -217,7 +222,11 @@ class PlotCanvas(FigureCanvasQTAgg):
         plotted, limits = self._draw_series(reihen, x_mode, pooled)
         prognose_drawn = self._draw_prognosen(reihen, x_mode)
         self._draw_thresholds(limits)
-        if today is not None and x_mode == "datum":
+        # Zeitachse mit Sprung zum aktuellen Datum (Einstellung "Darstellung"): ersetzt die Heute-Linie
+        jump = None
+        if x_mode == "datum" and prognose_drawn and getattr(prognose_config, "time_jump", False):
+            jump = self._time_jump(reihen, today or datetime.now())
+        if today is not None and x_mode == "datum" and jump is None:
             self._draw_today(today)
 
         # Prognose-Parameter-Info und "Keine Prognose vorhanden"-Hinweis
@@ -226,9 +235,43 @@ class PlotCanvas(FigureCanvasQTAgg):
         # und self._prognose_available).
         self._prognose_available = bool(self._prognose_info) or prognose_drawn
 
-        self._format_axes(x_mode, y_label)
+        self.time_jump_active = jump is not None      # fuer den Schalter in der Achsen-Ansicht
+        self._format_axes(x_mode, y_label, jump)
+        if jump is not None:
+            self._draw_jump_marker(jump, today or datetime.now())
         self._draw_legend_or_hint(plotted, reihen, x_mode)
         self.draw_idle()
+
+    # ---- Zeitachse mit Sprung -----------------------------------------
+
+    @staticmethod
+    def _time_jump(reihen, heute):
+        """``(Uebergang als Datum, Verschiebung in Tagen)`` oder ``None``.
+
+        Uebergang = letzter Messwert der Raeder mit Prognose (bei zwei Raedern der spaetere);
+        die Verschiebung ist der Abstand bis heute. Liegt der Messwert nicht weit genug zurueck,
+        bleibt die normale Achse.
+        """
+        lasts = [max(p.datum for p in mr.historie) for _, mr, prog in reihen
+                 if prog is not None and mr.historie]
+        if not lasts:
+            return None
+        x_j = max(lasts)
+        delta = (heute - x_j).total_seconds() / 86400.0
+        return (x_j, delta) if delta > TIME_JUMP_MIN_DAYS else None
+
+    def _draw_jump_marker(self, jump, heute):
+        """Senkrechte Linie am Uebergang; die Ueberschrift "heute (Datum)" steht ueber der Achse,
+        damit die Legende sie nie verdeckt (bei weit rechts liegender Linie links davon)."""
+        ax = self._ax
+        x_j, _delta = jump
+        ax.axvline(x_j, color=COL_TODAY, linestyle="--", linewidth=0.9, alpha=0.9)
+        lo, hi = ax.get_xlim()
+        right_side = (mdates.date2num(x_j) - lo) / (hi - lo) > 0.55
+        ax.annotate(f"heute ({heute:%d.%m.%Y})", xy=(x_j, 1.0), xycoords=("data", "axes fraction"),
+                    xytext=(-4 if right_side else 4, 3), textcoords="offset points",
+                    ha="right" if right_side else "left", va="bottom",
+                    color=COL_TODAY, fontsize=8, annotation_clip=False)
 
     # ---- Messwerte ----------------------------------------------------
 
@@ -400,9 +443,14 @@ class PlotCanvas(FigureCanvasQTAgg):
             ax.axvline(today, color=COL_TODAY, linestyle="--", linewidth=0.8, alpha=0.8)
             ax.text(today, ax.get_ylim()[1], "  heute", color=COL_TODAY, fontsize=8, va="top")
 
-    def _format_axes(self, x_mode, y_label):
+    def _format_axes(self, x_mode, y_label, jump=None):
         ax = self._ax
-        if x_mode == "datum":
+        if x_mode == "datum" and jump is not None:
+            locator = ShiftedDateLocator(mdates.date2num(jump[0]), jump[1])
+            ax.xaxis.set_major_locator(locator)
+            ax.xaxis.set_major_formatter(ShiftedDateFormatter(locator))
+            ax.set_xlabel("Datum  (ab Prognosebeginn um den Abstand zu heute verschoben)")
+        elif x_mode == "datum":
             ax.xaxis.set_major_locator(mdates.AutoDateLocator())
             # Bei kurzen Zeitraeumen (z.B. alle Messwerte eines Tages) waere
             # "%Y-%m" an jeder Marke gleich -> feiner beschriften.

@@ -1,13 +1,14 @@
 """Ebene 4: Achse (Diagramm je Messgroesse mit Kennzahlen)."""
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QComboBox, QHBoxLayout, QLabel, QTabWidget, QVBoxLayout, QWidget
 
 from ...data.models import Achse, Drehgestell, Einheit, Side
 from ...logic.prognose import faelligkeit_shift
@@ -30,6 +31,7 @@ class AchseView(QWidget):
     Messgroessen nur die Historie gegen die Schwellen.
     """
     drilldown = Signal(list)   # fuer Konsistenz mit BaseView (ungenutzt in L4)
+    time_jump_changed = Signal(bool)   # Schalter "Zeitachse mit Sprung" im Diagramm umgestellt
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -39,6 +41,7 @@ class AchseView(QWidget):
         self._x_mode = "datum"
         self._side_filter = "both"   # both | left | right
         self._prognose_config = None   # von MainWindow gesetzt
+        self._time_jump = False         # Darstellung: Zeitachse mit Sprung zum aktuellen Datum
         self._flotte = None             # fuer Fleet-Fallback der Prognose-Parameter
 
         lay = QVBoxLayout(self)
@@ -64,6 +67,10 @@ class AchseView(QWidget):
         self._side_combo.addItems(["Beide", "Nur links (LKD1)", "Nur rechts (LKD2)"])
         self._side_combo.currentIndexChanged.connect(self._on_side_changed)
         ctrl.addWidget(self._side_combo)
+        ctrl.addSpacing(16)
+        self._jump_cb = QCheckBox("Zeitachse mit Prognose ab heute")
+        self._jump_cb.toggled.connect(self._on_time_jump_toggled)
+        ctrl.addWidget(self._jump_cb)
         ctrl.addStretch(1)
         lay.addLayout(ctrl)
 
@@ -95,6 +102,10 @@ class AchseView(QWidget):
 
     def set_prognose_config(self, cfg):
         self._prognose_config = cfg
+        self._time_jump = bool(getattr(cfg, "time_jump", False))
+        self._jump_cb.blockSignals(True)
+        self._jump_cb.setChecked(self._time_jump)
+        self._jump_cb.blockSignals(False)
         if hasattr(self, "_tabs") and self._achse is not None:
             self._redraw_current()
 
@@ -190,12 +201,36 @@ class AchseView(QWidget):
 
     # ------------------------------------------------------------------
 
+    def _on_time_jump_toggled(self, checked):
+        self._time_jump = bool(checked)
+        self._redraw_current()
+        self.time_jump_changed.emit(self._time_jump)
+
+    def _update_jump_control(self, active):
+        """Schalter nur bei X-Achse Datum bedienbar; Tooltip sagt, warum er ggf. nichts bewirkt."""
+        datum = self._x_mode == "datum"
+        self._jump_cb.setEnabled(datum)
+        if not datum:
+            tip = "Nur bei X-Achse Datum verfuegbar"
+        elif active:
+            tip = "Zeitmarken rechts der Linie zeigen das um den Abstand zu heute verschobene Datum"
+        elif self._time_jump:
+            tip = ("Ohne Wirkung: es gibt keine Prognose, oder der letzte Messwert liegt "
+                   "nicht mehr als 90 Tage zurueck")
+        else:
+            tip = "Zeitmarken ab dem ersten Prognosewert auf das aktuelle Datum verschieben"
+        self._jump_cb.setToolTip(tip)
+
     def _on_x_mode_changed(self, idx):
         self._x_mode = "datum" if idx == 0 else "km"
         self._redraw_current()
 
     def _on_side_changed(self, idx):
         self._side_filter = {0: "both", 1: "left", 2: "right"}[idx]
+        self._redraw_current()
+
+    def redraw(self):
+        """Zeichnet den aktuellen Reiter neu (z.B. nach geaenderter Darstellung)."""
         self._redraw_current()
 
     def _redraw_current(self):
@@ -211,11 +246,18 @@ class AchseView(QWidget):
             y_label=f"{mg_name} [mm]",
             x_mode=self._x_mode,
             today=datetime.now(),
-            prognose_config=self._prognose_config,
+            prognose_config=self._effective_config(),
             flotte=self._flotte,
             achse=self._achse,
         )
+        self._update_jump_control(getattr(current.canvas, "time_jump_active", False))
         self._update_kennzahlen(mg_name, reihen)
+
+    def _effective_config(self):
+        """Konfiguration mit dem Stand des Schalters (der Schalter hat Vorrang)."""
+        from ...data.models import PrognoseConfig
+        cfg = self._prognose_config if self._prognose_config is not None else PrognoseConfig()
+        return dataclasses.replace(cfg, time_jump=self._time_jump)
 
     def _reihen_for(self, mg_name):
         """Messreihen der Messgroesse je Rad (gemaess Radauswahl) als
@@ -272,6 +314,7 @@ class AchseView(QWidget):
         letzt = mr.letzter_wert()
         if letzt:
             card = KpiCard(f"{mg_name} {seite_de} (letzter)", f"{fmt_num(letzt.stand)} mm")
+            card.setSubValue(f"Messung {letzt.datum.date().isoformat()}")
             card.set_status_border(mr.status)
             widgets.append(card)
 

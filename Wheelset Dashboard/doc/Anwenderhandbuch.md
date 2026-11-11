@@ -175,6 +175,18 @@ Was zu sehen ist:
   - *CSV:* Pfade zu Rohdaten- und Prognose-CSV.
   - *Oracle:* DSN, User, Passwort, Button *DB-Testverbindung* (Test
     läuft sofort, Ergebnis steht unter dem Button).
+- **Darstellung:** Option *Zeitachse mit Prognose ab heute* (Standard: aus). Die
+  Prognose hängt am letzten Messwert; liegt er Jahre zurück, steht sie im Diagramm in der
+  Vergangenheit. Ist die Option an, bleibt die Achse durchgehend und im gleichen Maßstab, aber
+  ab dem ersten Prognosewert zeigen die Zeitmarken das Datum **verschoben um den Abstand zu
+  heute** (so passen sie zu den Terminen in Kacheln und Gantt). Eine senkrechte Linie am
+  Übergang trägt die Überschrift *heute (Datum)*; die Marken links davon sind echte Messdaten.
+  Wirkt nur bei X-Achse *Datum*, mit vorhandener Prognose und wenn der letzte Messwert mehr als
+  90 Tage zurückliegt. Dieselbe Umschaltung gibt es im Achsen-Diagramm als Schalter
+  *Zeitachse mit Prognose ab heute* neben X-Achse und Rad (bei X-Achse *Laufleistung*
+  gesperrt; der Tooltip nennt den Grund, falls er keine Wirkung hat). Einstellung und Schalter
+  sind gekoppelt, gelten sofort und werden nicht gespeichert: nach dem Neustart ist die
+  Darstellung wieder normal.
 - **Prognose › Neuberechnung:** Button *Prognose jetzt neu berechnen*
   startet das Backend-Skript, das die komplette Prognose in die
   Prognose-Tabelle neu schreibt. Der Dialog schließt sich, die
