@@ -765,27 +765,10 @@ class MainWindow(QMainWindow):
             "oracle_user": self._repo.config.oracle_user or "",
             "oracle_password": self._repo.config.oracle_password or "",
             "refresh_min": "15",
-            "p_auto": self._prog_cfg.auto_from_history,
-            "p_delta": self._prog_cfg.reprof_typical_magnitude_mm,
-            "p_interval": self._prog_cfg.reprof_typical_interval_km,
-            "p_min_jump": self._prog_cfg.reprof_dlkd_abs_min,
-            "p_show_steps": self._prog_cfg.show_reprof_steps,
-            "p_show_ci": self._prog_cfg.show_ci_band,
-            "p_ci_level": self._prog_cfg.ci_level,
         }
         dlg = SettingsDialog(cfg, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             new = dlg.get_config()
-            self._prog_cfg = PrognoseConfig(
-                reprof_typical_magnitude_mm=new["p_delta"],
-                reprof_typical_interval_km=new["p_interval"],
-                reprof_dlkd_abs_min=new["p_min_jump"],
-                auto_from_history=new["p_auto"],
-                show_reprof_steps=new["p_show_steps"],
-                show_ci_band=new["p_show_ci"],
-                ci_level=new["p_ci_level"],
-            )
-            self._view_achse.set_prognose_config(self._prog_cfg)
             new_repo_cfg = RepositoryConfig(
                 profile_name=new["profile"],
                 source=new["source"],

@@ -175,11 +175,6 @@ Was zu sehen ist:
   - *CSV:* Pfade zu Rohdaten- und Prognose-CSV.
   - *Oracle:* DSN, User, Passwort, Button *DB-Testverbindung* (Test
     läuft sofort, Ergebnis steht unter dem Button).
-- **Prognose › LKD:**
-  - *Reprofilierungs-Erkennung:* Auto-Erkennung an/aus, Sprung-Schwelle.
-  - *Standard-Werte:* Fallback-Sprung und -Intervall.
-  - *Darstellung:* Treppen zeichnen, KI-Band zeigen, Konfidenzniveau
-    (80 / 90 / 95 / 99 %).
 - **Prognose › Neuberechnung:** Button *Prognose jetzt neu berechnen*
   startet das Backend-Skript, das die komplette Prognose in die
   Prognose-Tabelle neu schreibt. Der Dialog schließt sich, die

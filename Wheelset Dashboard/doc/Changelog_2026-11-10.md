@@ -390,10 +390,32 @@ Dashboard übergibt `pipeline.use_database`, `pipeline.write_prog_data=true`, `p
 bleibt an einem Fenster hängen. 15 neue Tests (Befehlszeile, INI unverändert, Fehlerfälle, Vorrang vor der INI).
 
 
+## 21. Wirkungslose Prognose-Einstellungen entfernt
+
+Dateien: `ui/settings_dialog.py`, `ui/main_window.py`, `data/models.py` (`PrognoseConfig.show_ci_band`),
+`doc/Anwenderhandbuch.md`, `tests/test_settings_dialog.py`.
+
+Anlass: „Konfidenzband anzeigen“ zeigte nichts im Diagramm. Das Band wurde aus dem dashboard-eigenen
+Prognose-Fit berechnet und mit der Umstellung auf die Prognose aus der Tabelle (`4fdc39a`, 5.11.) aus dem
+Diagramm entfernt; die Tabelle enthält keine Konfidenzwerte. Eine Prüfung ergab, dass **keine** der
+Prognose-Einstellungen mehr gelesen wurde (nur vom ungenutzten Code in `logic/prognose.py`).
+
+Entfernt sind: Konfidenzband und Konfidenzniveau, Reprofilierungs-Erkennung (Auto-Erkennung, Sprung-Schwelle),
+Standard-Werte (Sprung, Intervall) und „Treppen-Prognose“, jeweils mit Dialogseite, Baumeintrag,
+Konfigurationsschlüsseln und der Übergabe im Hauptfenster. Der Dialog enthält unter „Prognose“ nur noch
+die Neuberechnung (der Eintrag „Prognose“ zeigt dieselbe Seite). Der Hinweistext dort stimmt wieder („das
+Dashboard bleibt bedienbar“).
+
+Unverändert: `PrognoseConfig` bleibt als Datenklasse mit Standardwerten für den erhaltenen, ungenutzten
+Prognose-Code bestehen, ebenso die durchgereichten Parameter in den Ansichten (ohne Wirkung). Das PRD nennt
+weiter ein optionales 90-%-KI-Band; es ist nicht umgesetzt. Ein Band bräuchte die Steigungsgrenzen aus dem
+Backend (zusätzliche Spalten in `BO_RADSATZDATEN_PROGNOSE`).
+
+
 ## Tests
 
 `tests/test_abellio_profile.py` (33 Fälle): Namensvarianten inkl. des
 Laufradsatz-Falls, Nullwerte, kollidierende Drehgestelle, Einheit ohne
 Struktur, Toleranzbereiche als Grenzwerte, nicht zuordenbare Lager-Zeilen und
-dass VGF unverändert bleibt. `tests/test_donut_counts.py` (4 Fälle) sichert die Donut-Zählung, `tests/test_mob_profile.py` (23 Fälle) das MOB-Profil (echte Bezeichnungen, Messpositionen, unvollständige Termine, Lager, Drehgestell-Wechsel), `tests/test_lager_reinstalled.py` (5 Fälle) das Ausblenden wieder eingebauter Komponenten. Gesamt 186 Tests grün (neu: `test_smoke_profiles.py` 15 Fälle, `test_background_loading.py` 9, `test_aggregation.py` 10, `test_app_paths.py` 16, `test_repository.py` 7, `test_achse_view_controls.py` 6, `test_messdaten_icon.py` 8, `test_structure.py` 19, `test_perf.py` 5, `test_backend_runner.py` 15); zusätzlich ein
+dass VGF unverändert bleibt. `tests/test_donut_counts.py` (4 Fälle) sichert die Donut-Zählung, `tests/test_mob_profile.py` (23 Fälle) das MOB-Profil (echte Bezeichnungen, Messpositionen, unvollständige Termine, Lager, Drehgestell-Wechsel), `tests/test_lager_reinstalled.py` (5 Fälle) das Ausblenden wieder eingebauter Komponenten. Gesamt 192 Tests grün (neu: `test_smoke_profiles.py` 15 Fälle, `test_background_loading.py` 9, `test_aggregation.py` 10, `test_app_paths.py` 16, `test_repository.py` 7, `test_achse_view_controls.py` 6, `test_messdaten_icon.py` 8, `test_structure.py` 19, `test_perf.py` 5, `test_backend_runner.py` 15, `test_settings_dialog.py` 6); zusätzlich ein
 Strukturvergleich VGF vor/nach der Änderung (identischer Fingerabdruck).

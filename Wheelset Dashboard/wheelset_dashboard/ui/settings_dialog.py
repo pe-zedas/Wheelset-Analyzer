@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+    QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QSplitter, QStackedWidget, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
@@ -29,14 +29,6 @@ class SettingsDialog(QDialog):
             ("Oracle", "oracle", "Datenquelle · Oracle", ()),
         )),
         ("Prognose", "prognose_overview", "Prognose", (
-            ("LKD", "prognose_overview", "Prognose · LKD", (
-                ("Reprofilierungs-Erkennung", "prognose_reprof",
-                 "Prognose · LKD · Reprofilierungs-Erkennung", ()),
-                ("Standard-Werte", "prognose_standard",
-                 "Prognose · LKD · Standard-Werte", ()),
-                ("Darstellung", "prognose_darstellung",
-                 "Prognose · LKD · Darstellung", ()),
-            )),
             ("Neuberechnung", "prognose_recalc", "Prognose · Neuberechnung", ()),
         )),
     )
@@ -59,9 +51,6 @@ class SettingsDialog(QDialog):
         self._build_page_source(config)
         self._build_page_csv(config)
         self._build_page_oracle(config)
-        self._build_page_prognose_lkd_reprof(config)
-        self._build_page_prognose_lkd_standard(config)
-        self._build_page_prognose_lkd_darstellung(config)
         self._build_page_prognose_recalc(config)
         self._build_tree()
 
@@ -240,75 +229,17 @@ class SettingsDialog(QDialog):
                 or self.oracle_pw.text()):
             self._load_oracle_for_profile(self.profile.currentText())
 
-    def _build_page_prognose_lkd_reprof(self, config: dict):
-        form = self._new_page(
-            "prognose_reprof",
-            "Erkennung der Reprofilierungs-Ereignisse aus der Historie. "
-            "Bei aktiver Auto-Erkennung werden die Standard-Werte nur als "
-            "Fallback verwendet, wenn in der Historie kein Reprofilieren "
-            "zu erkennen ist."
-        )
-        self.p_auto = QCheckBox("Reprofilierungs-Werte aus Historie ableiten")
-        self.p_auto.setChecked(bool(config.get("p_auto", True)))
-        form.addRow("Auto-Erkennung", self.p_auto)
-
-        self.p_min_jump = QDoubleSpinBox()
-        self.p_min_jump.setRange(0.1, 20.0); self.p_min_jump.setSingleStep(0.5)
-        self.p_min_jump.setSuffix(" mm")
-        self.p_min_jump.setValue(float(config.get("p_min_jump", 2.0)))
-        form.addRow("Sprung-Schwelle für Erkennung", self.p_min_jump)
-
-    def _build_page_prognose_lkd_standard(self, config: dict):
-        form = self._new_page(
-            "prognose_standard",
-            "Fallback-Werte, wenn aus der Historie keine Reprofilierungs-"
-            "Muster abgeleitet werden koennen."
-        )
-        self.p_delta = QDoubleSpinBox()
-        self.p_delta.setRange(1.0, 50.0); self.p_delta.setSingleStep(0.5)
-        self.p_delta.setSuffix(" mm")
-        self.p_delta.setValue(float(config.get("p_delta", 15.0)))
-        form.addRow("Reprofilierungs-Sprung", self.p_delta)
-
-        self.p_interval = QDoubleSpinBox()
-        self.p_interval.setRange(1000, 1000000); self.p_interval.setSingleStep(5000)
-        self.p_interval.setSuffix(" km")
-        self.p_interval.setValue(float(config.get("p_interval", 150000.0)))
-        form.addRow("Reprofilierungs-Intervall", self.p_interval)
-
-    def _build_page_prognose_lkd_darstellung(self, config: dict):
-        form = self._new_page(
-            "prognose_darstellung",
-            "Visualisierung der Prognose im Achsen-Detailplot."
-        )
-        self.p_show_steps = QCheckBox("Reprofilierungs-Treppen in der Prognose zeichnen")
-        self.p_show_steps.setChecked(bool(config.get("p_show_steps", True)))
-        form.addRow("Treppen-Prognose", self.p_show_steps)
-
-        self.p_show_ci = QCheckBox("Konfidenzband um die Prognose zeichnen")
-        self.p_show_ci.setChecked(bool(config.get("p_show_ci", False)))
-        form.addRow("KI-Band", self.p_show_ci)
-
-        self.p_ci_level = QComboBox()
-        self.p_ci_level.addItems(["80", "90", "95", "99"])
-        self.p_ci_level.setCurrentText(
-            str(int(float(config.get("p_ci_level", 0.90)) * 100)))
-        form.addRow("Konfidenzniveau (%)", self.p_ci_level)
-
-        # Uebersichts-Platzhalter (wenn der Nutzer "Prognose" oder "LKD"
-        # direkt im Baum anklickt — die Darstellungs-Seite dient als
-        # sinnvollster Default).
-        self._pages["prognose_overview"] = self._pages["prognose_darstellung"]
-
     def _build_page_prognose_recalc(self, config: dict):
         form = self._new_page(
             "prognose_recalc",
             "Startet das Backend-Skript 'Wheelset Analyzer_new_approach' und "
             "schreibt die neu berechnete Prognose in die Prognose-Tabelle. "
-            "Je nach Datenmenge dauert das einige Minuten — das Dashboard "
-            "reagiert in dieser Zeit nicht. Die Neuberechnung startet erst "
-            "nach OK (die aktuellen Einstellungen werden vorher uebernommen)."
+            "Je nach Datenmenge dauert das einige Minuten; das Dashboard "
+            "bleibt dabei bedienbar. Die Neuberechnung startet erst nach OK "
+            "(die aktuellen Einstellungen werden vorher uebernommen)."
         )
+        # Der Baumeintrag "Prognose" zeigt ebenfalls diese Seite.
+        self._pages["prognose_overview"] = self._pages["prognose_recalc"]
         btn_row = QHBoxLayout()
         self._recalc_btn_dlg = QPushButton("Prognose jetzt neu berechnen")
         self._recalc_btn_dlg.setToolTip(
@@ -386,14 +317,6 @@ class SettingsDialog(QDialog):
             "oracle_user": self.oracle_user.text(),
             "oracle_password": self.oracle_pw.text(),
             "refresh_min": self.refresh_min.currentText(),
-            # Prognose
-            "p_auto": self.p_auto.isChecked(),
-            "p_delta": self.p_delta.value(),
-            "p_interval": self.p_interval.value(),
-            "p_min_jump": self.p_min_jump.value(),
-            "p_show_steps": self.p_show_steps.isChecked(),
-            "p_show_ci": self.p_show_ci.isChecked(),
-            "p_ci_level": float(self.p_ci_level.currentText()) / 100.0,
         }
 
 

@@ -226,7 +226,6 @@ class PrognoseConfig:
     # Verhalten
     auto_from_history: bool = True
     show_reprof_steps: bool = True
-    show_ci_band: bool = False
 
 
 @dataclass
