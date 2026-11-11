@@ -25,7 +25,10 @@ from .common import (
     MGROESSEN_SPALTEN,
     set_ampel_cell,
     set_messdaten_cell,
+    set_prognose_cell,
+    fill_column_min_text,
     setup_messdaten_column,
+    setup_prognose_column,
     show_values,
 )
 
@@ -115,15 +118,16 @@ class LagerView(BaseView):
         self._dp_title.setText(f"Status Verteilung · Lager-Räder{suffix}")
 
         headers = ["", "Typ", "Bezeichnung", "letzte Einheit", "Ausbau", "Zustand"] + \
-                  [MGROESSEN_LABEL[k] for k in MGROESSEN_SPALTEN] + [""]
-        c_data = len(headers) - 1
+                  [MGROESSEN_LABEL[k] for k in MGROESSEN_SPALTEN] + ["", ""]
+        c_data = len(headers) - 2
+        c_prog = len(headers) - 1
         # Beim Fuellen temporaer Sortierung aus, sonst wandern Zeilen beim Einfuegen
         self._table.setSortingEnabled(False)
         self._table.setColumnCount(len(headers))
         self._table.setHorizontalHeaderLabels(headers)
         self._table.setRowCount(len(items))
         for i, c in enumerate(items):
-            set_ampel_cell(self._table, i, 0, c.status())
+            set_ampel_cell(self._table, i, 0, c.status(), always_dot=True)
 
             kind_text = "Drehgestell" if c.kind == "drehgestell" else "Achse"
             if c.kind == "drehgestell" and c.achsen:
@@ -147,6 +151,7 @@ class LagerView(BaseView):
                 s, v = mg_data.get(k, (StatusAmpel.GRAY, None))
                 set_ampel_cell(self._table, i, 6 + j, s, v)
             set_messdaten_cell(self._table, i, c_data, c)
+            set_prognose_cell(self._table, i, c_prog, c)
         self._table.setSortingEnabled(True)
 
         self._table.resizeColumnsToContents()
@@ -154,7 +159,6 @@ class LagerView(BaseView):
         hdr.setSectionResizeMode(0, QHeaderView.Fixed); self._table.setColumnWidth(0, 28)
         hdr.setSectionResizeMode(1, QHeaderView.Fixed); self._table.setColumnWidth(1, 90)
         hdr.setSectionResizeMode(2, QHeaderView.Interactive); self._table.setColumnWidth(2, 160)
-        hdr.setSectionResizeMode(3, QHeaderView.Stretch)   # Stretch jetzt auf "letzte Einheit"
         hdr.setSectionResizeMode(4, QHeaderView.Fixed); self._table.setColumnWidth(4, 90)
         hdr.setSectionResizeMode(5, QHeaderView.Fixed); self._table.setColumnWidth(5, 110)
         col_w = 76 if show_values() else 60
@@ -162,6 +166,8 @@ class LagerView(BaseView):
             hdr.setSectionResizeMode(j, QHeaderView.Fixed)
             self._table.setColumnWidth(j, col_w)
         setup_messdaten_column(self._table, c_data)
+        setup_prognose_column(self._table, c_prog)
+        fill_column_min_text(self._table, 3)  # letzte Einheit: fuellt, aber nie schmaler als der Text
 
         # Gantt-Kachel aus der aktuellen Zeilenreihenfolge aufbauen
         self._rebuild_gantt_from_table()

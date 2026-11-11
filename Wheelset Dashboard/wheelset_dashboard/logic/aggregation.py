@@ -67,6 +67,19 @@ def has_messdaten(obj) -> bool:
     return any(mr.historie for mr in iter_messreihen(obj))
 
 
+def has_prognose(obj) -> bool:
+    """True, wenn unter ``obj`` mindestens eine Messreihe mit Messwerten Prognosewerte hat
+    (Treppenkurve oder Termine/Laufleistungen aus der Prognose-Tabelle)."""
+    for mr in iter_messreihen(obj):
+        p = mr.prognose
+        if p is None or not mr.historie:
+            continue
+        if p.punkte or any(v is not None for v in
+                           (p.datum_warnwert, p.datum_grenzwert, p.km_warnwert, p.km_grenzwert)):
+            return True
+    return False
+
+
 def iter_achsen(obj) -> Iterator[object]:
     """Alle Achsen unter ``obj``; ``obj`` darf auch eine Liste sein.
 

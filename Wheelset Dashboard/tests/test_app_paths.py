@@ -1,11 +1,41 @@
 """Connect-String-Datei und -Zerlegung (dort stehen Zugangsdaten: Zuordnung je
-Kunde darf nie vermischt werden)."""
+Kunde darf nie vermischt werden); App-Root im Entwicklungsbetrieb und als PyInstaller-EXE."""
+import importlib
+import sys
+
 import pytest
 
 from wheelset_dashboard.config import app_paths
 from wheelset_dashboard.config.app_paths import (
     build_connect_string, parse_connect_string, read_oracle_connect_string,
 )
+
+
+def test_app_root_liegt_im_entwicklungsbetrieb_ueber_dem_paket():
+    """Normaler Lauf (python -m / Tests): App-Root ist der Projektordner, eine Ebene ueber
+    wheelset_dashboard/ — dort legt die App ihr config/-Verzeichnis an (Connect-String, Log)."""
+    assert app_paths.APP_ROOT == app_paths._PACKAGE_DIR.parent
+    assert app_paths.CONFIG_DIR == app_paths.APP_ROOT / "config"
+
+
+def test_app_root_liegt_bei_pyinstaller_neben_der_exe(monkeypatch, tmp_path):
+    """Als PyInstaller-EXE zeigt __file__ auf das Temp-Extraktionsverzeichnis (_MEIPASS), das bei
+    --onefile nach jedem Lauf verworfen wird. Die Betriebs-Konfiguration (Oracle-Connect-String,
+    Logdatei) muss trotzdem dauerhaft neben der .exe liegen bleiben, sonst ist sie beim naechsten
+    Start weg -> APP_ROOT muss dort aus sys.executable berechnet werden, nicht aus __file__."""
+    exe = tmp_path / "Wheelset-Dashboard.exe"
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe))
+    importlib.reload(app_paths)
+    try:
+        assert app_paths.APP_ROOT == tmp_path
+        assert app_paths.CONFIG_DIR == tmp_path / "config"
+    finally:
+        # Vor dem Zurueckladen explizit entfrosten: sys.frozen bliebe sonst bis zum Ende der
+        # Testfunktion True (monkeypatch macht erst danach rueckgaengig) und der Reload wuerde
+        # erneut den PyInstaller-Zweig nehmen.
+        monkeypatch.setattr(sys, "frozen", False, raising=False)
+        importlib.reload(app_paths)
 
 
 @pytest.fixture

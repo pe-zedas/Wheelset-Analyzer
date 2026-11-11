@@ -1,4 +1,4 @@
-"""Spalte "Messdaten vorhanden": Diagramm-Symbol ganz rechts, wenn die Zeile selbst
+"""Spalte "Messdaten vorhanden": Diagramm-Symbol (vorletzte Spalte), wenn die Zeile selbst
 oder eine darunterliegende Komponente Messdaten hat."""
 from datetime import datetime
 
@@ -66,7 +66,7 @@ def flotte():
 
 def zeilen(table, text_col):
     """{Text der Spalte text_col: hat Symbol in der letzten Spalte}."""
-    last = table.columnCount() - 1
+    last = table.columnCount() - 2        # vorletzte: Messdaten, letzte: Prognose
     out = {}
     for r in range(table.rowCount()):
         out[table.item(r, text_col).text()] = not table.item(r, last).icon().isNull()
@@ -117,11 +117,11 @@ def test_lagertabelle_zeigt_symbol_je_komponente(flotte):
     assert zeilen(v._table, 2) == {"LDG mit": True, "LDG leer": False, "LDG ohne Achsen": False}
 
 
-def test_symbolspalte_ist_die_letzte_schmale_leere_spalte(flotte):
+def test_symbolspalte_ist_schmal_und_ohne_ueberschrift(flotte):
     v = FlotteView()
     v.set_flotte(flotte)
     t = v._table
-    last = t.columnCount() - 1
+    last = t.columnCount() - 2
     assert t.horizontalHeaderItem(last).text() == ""
     assert t.columnWidth(last) <= 32
     assert t.item(0, last).toolTip() in ("", MESSDATEN_TOOLTIP)
@@ -131,7 +131,7 @@ def test_symbolspalte_sortiert_nach_vorhandensein(flotte):
     v = FlotteView()
     v.set_flotte(flotte)
     t = v._table
-    last = t.columnCount() - 1
+    last = t.columnCount() - 2
     t.sortItems(last, Qt.DescendingOrder)
     assert t.item(0, 1).text() == "Zug A"          # mit Messdaten zuerst
     t.sortItems(last, Qt.AscendingOrder)

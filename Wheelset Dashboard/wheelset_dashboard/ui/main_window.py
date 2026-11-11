@@ -137,6 +137,9 @@ class MainWindow(QMainWindow):
         self._reload_pending = False
         self._first_data_logged = False
         self._current_path: List[Tuple[str, str]] = []
+        self._lager_komp = None          # zuletzt geoeffnete Lager-Komponente (Rueckspruenge)
+        self._lager_achse = None
+
         self.setWindowTitle("Wheelset Analyzer Dashboard")
         self.resize(1200, 740)
         log.debug("MW phase: super+title+resize=%.2fs", self._startup.seconds)
@@ -434,6 +437,7 @@ class MainWindow(QMainWindow):
                     f"Stand {datetime.now().strftime('%H:%M:%S')}  ·  Profil: {repo.profile.name}  "
                     f"·  {len(flotte.einheiten)} Einheiten, {len(flotte.lager)} Lager-Komp."
                 )
+                self._lager_komp = self._lager_achse = None     # Objekte der alten Daten
                 self.navigate(self._current_path)
                 if not self._first_data_logged:
                     self._first_data_logged = True
@@ -593,9 +597,23 @@ class MainWindow(QMainWindow):
                     self._stack.setCurrentWidget(self._view_achse)
             self._nav.set_active("flotte")
         elif path[0][0] == "lager":
-            self._show_lager()
+            self._navigate_lager(path)
             return
         self._breadcrumb.set_path(bc)
+
+    def _navigate_lager(self, path):
+        """Rueckspruenge ueber die Navigationsleiste im Lager-Kontext.
+
+        ``Lager`` → Lager-Tabelle; ``Lager › <Drehgestell>`` → Achsenliste dieses Lager-Drehgestells;
+        ``Lager › <Drehgestell> › <Achse>`` → Diagramm dieser Achse (der Pfad ist der zuletzt geoeffnete)."""
+        komp = self._lager_komp
+        if len(path) >= 2 and path[1][0] == "lager-dg" and komp is not None:
+            if len(path) == 2:
+                self._open_lager_axle(komp, None)
+            elif self._lager_achse is not None:
+                self._open_lager_axle(komp, self._lager_achse)
+            return
+        self._show_lager()
 
     def _show_lager(self):
         if self._flotte is None:
@@ -606,6 +624,7 @@ class MainWindow(QMainWindow):
         self._nav.set_active("lager_alle")
         self._breadcrumb.set_path([("lager", "Lager · Komponenten")])
         self._current_path = []
+        self._lager_komp = self._lager_achse = None
 
     def _toggle_show_values(self, checked: bool):
         _views.set_show_values(checked)
@@ -683,6 +702,8 @@ class MainWindow(QMainWindow):
         - komp.kind == 'drehgestell' und achse gegeben → zeige AchseView fuer diese Achse
         - komp.kind == 'achse' → zeige direkt AchseView
         """
+        self._lager_komp = komp
+        self._lager_achse = achse
         # Achsen-Komponente ohne DG-Zwischenschritt
         if komp.kind == "achse":
             a = Achse(
@@ -716,6 +737,8 @@ class MainWindow(QMainWindow):
                 ("lager", "Lager"),
                 ("lager-dg", dg.dg_einbaupos),
             ])
+            # fuer "Messwerte anzeigen" (Neuaufbau ueber navigate) und Rueckspruenge
+            self._current_path = [("lager", "Lager"), ("lager-dg", dg.dg_einbaupos)]
             return
 
         # DG-Komponente mit konkreter Achse → AchseView
@@ -731,6 +754,8 @@ class MainWindow(QMainWindow):
                 ("lager-dg", dg.dg_einbaupos),
                 ("lager-achse", achse.rs_einbaupos or achse.rs_bez or "Achse"),
             ])
+            self._current_path = [("lager", "Lager"), ("lager-dg", dg.dg_einbaupos),
+                                  ("lager-achse", achse.rs_einbaupos or achse.rs_bez or "Achse")]
 
     def _lager_dg_axle_clicked(self, komp, path):
         """Verbindung aus DrehgestellView.drilldown im Lager-Kontext.

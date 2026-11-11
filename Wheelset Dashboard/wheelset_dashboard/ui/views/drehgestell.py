@@ -29,7 +29,10 @@ from .common import (
     MGROESSEN_SPALTEN,
     set_ampel_cell,
     set_messdaten_cell,
+    set_prognose_cell,
+    fill_column_min_text,
     setup_messdaten_column,
+    setup_prognose_column,
     show_values,
 )
 
@@ -99,8 +102,9 @@ class DrehgestellView(BaseView):
                 f"Messpositionen · {dg.dg_einbaupos}  ({n_pos} Messpositionen)")
         else:
             self._panel_title.setText(f"Achsen · {dg.dg_einbaupos}  ({n_real} Achsen)")
-        headers = ["", "Achsen-Pos", "RS-Bezeichnung"] + [MGROESSEN_LABEL[k] for k in MGROESSEN_SPALTEN] + [""]
-        c_data = len(headers) - 1
+        headers = ["", "Achsen-Pos", "RS-Bezeichnung"] + [MGROESSEN_LABEL[k] for k in MGROESSEN_SPALTEN] + ["", ""]
+        c_data = len(headers) - 2
+        c_prog = len(headers) - 1
         self._table.setSortingEnabled(False)
         self._table.setColumnCount(len(headers))
         self._table.setHorizontalHeaderLabels(headers)
@@ -112,18 +116,18 @@ class DrehgestellView(BaseView):
         for row, a in enumerate(self._rows):
             status = a.status()
             mg_data = collect_messgroessen_values(a)
-            set_ampel_cell(self._table, row, 0, status)
+            set_ampel_cell(self._table, row, 0, status, always_dot=True)
             self._table.setItem(row, 1, QTableWidgetItem(a.rs_einbaupos))
             self._table.setItem(row, 2, QTableWidgetItem(a.rs_bez))
             for i, k in enumerate(MGROESSEN_SPALTEN):
                 s, v = mg_data.get(k, (StatusAmpel.GRAY, None))
                 set_ampel_cell(self._table, row, 3 + i, s, v)
             set_messdaten_cell(self._table, row, c_data, a)
+            set_prognose_cell(self._table, row, c_prog, a)
         self._table.setSortingEnabled(True)
         self._apply_filter(self._filter_edit.text())
         self._table.resizeColumnsToContents()
         hdr = self._table.horizontalHeader()
-        hdr.setSectionResizeMode(2, QHeaderView.Stretch)
         col_w = 76 if show_values() else 60
         for i in range(3, 3 + len(MGROESSEN_SPALTEN)):
             hdr.setSectionResizeMode(i, QHeaderView.Fixed)
@@ -131,6 +135,8 @@ class DrehgestellView(BaseView):
         hdr.setSectionResizeMode(0, QHeaderView.Fixed)
         self._table.setColumnWidth(0, 28)
         setup_messdaten_column(self._table, c_data)
+        setup_prognose_column(self._table, c_prog)
+        fill_column_min_text(self._table, 2)  # RS-Bezeichnung: fuellt, aber nie schmaler als der Text
 
         # Initiales Gantt aus der aktuellen Tabellen-Reihenfolge
         self._rebuild_gantt_from_table()

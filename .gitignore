@@ -28,6 +28,11 @@ Wheelset Dashboard/Image_Radachse_clean.jpg
 *_v2_backup.py
 Wheelset Analyzer_new_approach/plot_lkd_flirt101_dg1_ls1.py
 
+# ── PyInstaller-Build (EXE fuer Tester, siehe README "Als EXE packen") ────
+build/
+dist/
+*.spec
+
 # ── Editor-/IDE-Artefakte ──────────────────────────────────────────────────
 .vscode/
 .idea/

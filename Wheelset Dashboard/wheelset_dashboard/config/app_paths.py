@@ -7,11 +7,22 @@ Betriebs-Konfiguration (DB-Credentials, …) sauber getrennt.
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 # wheelset_dashboard/config/app_paths.py → …/wheelset_dashboard/ → App-Root
 _PACKAGE_DIR = Path(__file__).resolve().parent.parent
-APP_ROOT = _PACKAGE_DIR.parent
+
+if getattr(sys, "frozen", False):
+    # Als PyInstaller-EXE (--onefile oder --onedir) zeigt __file__ auf das
+    # Temp-Extraktionsverzeichnis (sys._MEIPASS bzw. bei --onedir den
+    # Programmordner selbst) — bei --onefile wird das nach jedem Lauf verworfen
+    # und bei jedem Start neu angelegt. Die Betriebs-Konfiguration (Oracle-
+    # Connect-String, Logdatei) muss dauerhaft neben der .exe liegen, sonst ist
+    # sie beim naechsten Start weg.
+    APP_ROOT = Path(sys.executable).resolve().parent
+else:
+    APP_ROOT = _PACKAGE_DIR.parent
 
 CONFIG_DIR = APP_ROOT / "config"
 ORACLE_CONNECT_FILE = CONFIG_DIR / "oracle_connect_string.txt"

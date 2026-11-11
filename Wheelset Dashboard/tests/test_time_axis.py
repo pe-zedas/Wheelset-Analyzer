@@ -239,16 +239,37 @@ def test_schalter_folgt_der_einstellung_ohne_rueckmeldung():
     assert gemeldet == []
 
 
-def test_schalter_ist_bei_km_achse_gesperrt_und_erklaert_ohne_wirkung():
+def test_schalter_ist_ausgeblendet_wo_er_nichts_bewirken_kann():
     view, ax = _view_mit_prognose()
     view._jump_cb.setChecked(True)
-    assert "verschobene" in view._jump_cb.toolTip()
+    assert not view._jump_cb.isHidden()
+    # X-Achse Laufleistung
     view._x_combo.model().item(1).setEnabled(True)
     view._x_combo.setCurrentIndex(1)
-    assert not view._jump_cb.isEnabled()
+    assert view._jump_cb.isHidden()
     assert not isinstance(ax().xaxis.get_major_locator(), ShiftedDateLocator)
     view._x_combo.setCurrentIndex(0)
-    assert view._jump_cb.isEnabled() and isinstance(ax().xaxis.get_major_locator(), ShiftedDateLocator)
+    assert not view._jump_cb.isHidden() and isinstance(ax().xaxis.get_major_locator(), ShiftedDateLocator)
+
+
+def test_schalter_ist_bei_diagramm_ohne_prognose_oder_mit_juengstem_messwert_ausgeblendet():
+    from wheelset_dashboard.data.models import Achse, Drehgestell, Einheit, Rad, Side
+    from wheelset_dashboard.ui.views import AchseView
+
+    def oeffne(reihen):
+        mr = reihen[0][1]
+        achse = Achse(rs_id=None, rs_bez="", rs_einbaupos="A",
+                      raeder={Side.LEFT: Rad(seite=Side.LEFT, messreihen={"LKD": mr})})
+        dg = Drehgestell(dg_id=1, dg_bez="", dg_einbaupos="DG", achsen={"A": achse})
+        e = Einheit(topeinheit_id=1, topeinheit_bez="E", drehgestelle={"DG": dg})
+        v = AchseView()
+        v.set_prognose_config(PrognoseConfig())
+        v.set_achse(e, dg, achse)
+        return v
+
+    assert oeffne(_reihe(mit_prognose=False))._jump_cb.isHidden()
+    assert oeffne(_reihe(letzter=datetime.now() - timedelta(days=10)))._jump_cb.isHidden()
+    assert not oeffne(_reihe())._jump_cb.isHidden()
 
 
 def test_hauptfenster_merkt_den_stand_des_schalters(tmp_path):
@@ -274,5 +295,6 @@ def test_kachel_letzter_messwert_zeigt_datum_der_messung():
 
     view, _ = _view_mit_prognose()
     texte = [l.text() for l in view._kennzahlen_container.findChildren(QLabel)]
-    assert f"Messung {LETZTER.date().isoformat()}" in texte
+    assert f"Messung {LETZTER:%d.%m.%Y}" in texte               # Format TT.MM.JJJJ
+    assert not [t for t in texte if "2020-06" in t or "2026-" in t or "2027-" in t]   # kein ISO-Datum mehr
     assert view._jump_cb.text() == "Zeitachse mit Prognose ab heute"

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QSize, Qt, Signal
+from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -13,12 +14,13 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QTableWidget,
     QTableWidgetItem,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
 
 from ...data.models import StatusAmpel
-from ...logic.aggregation import has_messdaten
+from ...logic.aggregation import has_messdaten, has_prognose
 
 from ..widgets import AMPEL_COLORS, AmpelDot, KpiCard
 
@@ -80,6 +82,11 @@ def _ampel_sort_item(status: StatusAmpel) -> QTableWidgetItem:
     return _AmpelSortItem(status)
 
 
+def fmt_date(d) -> str:
+    """Datum fuer die Kacheln: TT.MM.JJJJ."""
+    return d.strftime("%d.%m.%Y")
+
+
 def fmt_num(value: float, decimals: int = 1) -> str:
     """Europäische Zahlendarstellung mit Komma als Dezimaltrenner."""
     return f"{value:.{decimals}f}".replace(".", ",")
@@ -115,11 +122,12 @@ def _centered(inner: QWidget) -> QWidget:
 
 
 def set_ampel_cell(table: QTableWidget, row: int, col: int,
-                    status: StatusAmpel, value: Optional[float] = None):
+                    status: StatusAmpel, value: Optional[float] = None, always_dot: bool = False):
     """Setzt eine Status-Zelle gemaess globalem SHOW_VALUES-Modus.
     Immer: unsichtbares Sort-Item fuer Sortierung.
     SHOW_VALUES=False → AmpelDot. SHOW_VALUES=True+value → Dot+Zahl.
     SHOW_VALUES=True+kein value → leere Zelle.
+    ``always_dot``: immer der AmpelDot, auch bei SHOW_VALUES (Gesamtstatus der Zeile in Spalte 0).
 
     Das Widget wird in einen zentrierenden Wrapper gesetzt, damit der
     AmpelDot in der schmalen Status-Spalte (28 px) nicht an einen Rand
@@ -129,7 +137,7 @@ def set_ampel_cell(table: QTableWidget, row: int, col: int,
     # vorherigen CellWidget-Zustand immer bereinigen (auch nach setItem,
     # weil Qt das alte Widget sonst stehen lassen kann)
     table.removeCellWidget(row, col)
-    if SHOW_VALUES:
+    if SHOW_VALUES and not always_dot:
         if value is None:
             return  # leer
         table.setCellWidget(row, col, _centered(_value_cell_widget(status, value)))
@@ -141,7 +149,7 @@ def set_ampel_cell(table: QTableWidget, row: int, col: int,
 # Spalte "Messdaten vorhanden" (Diagramm-Symbol ganz rechts)
 # -----------------------------------------------------------
 
-MESSDATEN_TOOLTIP = "Messdaten vorhanden"
+MESSDATEN_TOOLTIP = "Historische Daten vorhanden"
 _messdaten_icon = None
 
 
@@ -154,16 +162,51 @@ def _graph_icon():
     return _messdaten_icon
 
 
-class _MessdatenItem(QTableWidgetItem):
-    """Zelle mit Diagramm-Symbol, wenn Messdaten vorhanden sind; sortiert danach."""
-    def __init__(self, has_data: bool):
+PROGNOSE_TOOLTIP = "Prognose vorhanden"
+_prognose_icon = None
+
+
+def _prognose_symbol():
+    """Diagramm mit durchgezogener Linie, die gepunktet weiterlaeuft (= Prognose).
+    Selbst gezeichnet; erst beim ersten Gebrauch erzeugt (braucht QApplication)."""
+    global _prognose_icon
+    if _prognose_icon is None:
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
+        size = 32
+        pm = QPixmap(size, size)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing)
+        axis = QPen(QColor("#6B6F78"), 2)
+        p.setPen(axis)
+        p.drawLine(QPointF(4, 4), QPointF(4, 28))          # y-Achse
+        p.drawLine(QPointF(4, 28), QPointF(29, 28))        # x-Achse
+        solid = QPen(QColor("#378ADD"), 2.6)
+        solid.setCapStyle(Qt.RoundCap)
+        p.setPen(solid)
+        p.drawPolyline(QPolygonF([QPointF(7, 21), QPointF(12, 14), QPointF(17, 17)]))
+        dotted = QPen(QColor("#378ADD"), 2.6)
+        dotted.setStyle(Qt.CustomDashLine)
+        dotted.setDashPattern([0.1, 2.4])
+        dotted.setCapStyle(Qt.RoundCap)
+        p.setPen(dotted)
+        p.drawPolyline(QPolygonF([QPointF(17, 17), QPointF(23, 9), QPointF(29, 6)]))
+        p.end()
+        _prognose_icon = QIcon(pm)
+    return _prognose_icon
+
+
+class _SymbolItem(QTableWidgetItem):
+    """Zelle mit Symbol, wenn ``vorhanden``; sortiert danach (mit Symbol zuerst bei absteigend)."""
+    def __init__(self, vorhanden: bool, icon_factory, tooltip: str):
         super().__init__()
-        self.setData(Qt.UserRole, 1 if has_data else 0)
+        self.setData(Qt.UserRole, 1 if vorhanden else 0)
         self.setFlags(self.flags() & ~Qt.ItemIsEditable)
         self.setTextAlignment(Qt.AlignCenter)
-        if has_data:
-            self.setIcon(_graph_icon())
-            self.setToolTip(MESSDATEN_TOOLTIP)
+        if vorhanden:
+            self.setIcon(icon_factory())
+            self.setToolTip(tooltip)
 
     def __lt__(self, other):
         try:
@@ -175,17 +218,91 @@ class _MessdatenItem(QTableWidgetItem):
 def set_messdaten_cell(table: QTableWidget, row: int, col: int, obj):
     """Setzt das Diagramm-Symbol, wenn ``obj`` selbst oder eine darunterliegende
     Komponente Messdaten hat; sonst bleibt die Zelle leer."""
-    table.setItem(row, col, _MessdatenItem(has_messdaten(obj)))
+    table.setItem(row, col, _SymbolItem(has_messdaten(obj), _graph_icon, MESSDATEN_TOOLTIP))
 
 
-def setup_messdaten_column(table: QTableWidget, col: int):
-    """Schmale, feste Spalte ganz rechts."""
+def set_prognose_cell(table: QTableWidget, row: int, col: int, obj):
+    """Setzt das Prognose-Symbol (Linie, gepunktet fortgesetzt), wenn ``obj`` selbst oder eine
+    darunterliegende Komponente Prognosewerte hat; sonst bleibt die Zelle leer."""
+    table.setItem(row, col, _SymbolItem(has_prognose(obj), _prognose_symbol, PROGNOSE_TOOLTIP))
+
+
+def _setup_symbol_column(table: QTableWidget, col: int, tooltip: str):
     table.setIconSize(QSize(16, 16))
     table.horizontalHeader().setSectionResizeMode(col, QHeaderView.Fixed)
     table.setColumnWidth(col, 30)
     item = table.horizontalHeaderItem(col)
     if item is not None:
-        item.setToolTip(MESSDATEN_TOOLTIP)
+        item.setToolTip(tooltip)
+
+
+def setup_messdaten_column(table: QTableWidget, col: int):
+    """Schmale, feste Symbolspalte (Messdaten vorhanden)."""
+    _setup_symbol_column(table, col, MESSDATEN_TOOLTIP)
+
+
+def setup_prognose_column(table: QTableWidget, col: int):
+    """Schmale, feste Symbolspalte ganz rechts (Prognosewerte vorhanden)."""
+    _setup_symbol_column(table, col, PROGNOSE_TOOLTIP)
+
+
+# -----------------------------------------------------------
+# Spaltenbreiten
+# -----------------------------------------------------------
+
+HEADER_EXTRA_PX = 30      # Kopfzeile: Innenabstand + Sortierpfeil
+CELL_EXTRA_PX = 20        # Zelle: Innenabstand
+
+
+def text_width(table: QTableWidget, col: int) -> int:
+    """Breite in Pixeln, die Kopfzeile und alle Zellen der Spalte als Text brauchen (inkl. Rand)."""
+    fm = table.fontMetrics()
+    head = table.horizontalHeaderItem(col)
+    w = fm.horizontalAdvance(head.text()) + HEADER_EXTRA_PX if head is not None else 0
+    for row in range(table.rowCount()):
+        item = table.item(row, col)
+        if item is not None and item.text():
+            w = max(w, fm.horizontalAdvance(item.text()) + CELL_EXTRA_PX)
+    return w
+
+
+def fit_to_text(table: QTableWidget, col: int):
+    """Spalte so schmal wie ihr Text es zulaesst (statt Qt-Standardbreite)."""
+    table.horizontalHeader().setSectionResizeMode(col, QHeaderView.Interactive)
+    table.setColumnWidth(col, text_width(table, col))
+
+
+class _FillColumn(QObject):
+    """Haelt eine Spalte so breit, dass die Tabelle genau ausgefuellt ist, aber nie schmaler
+    als ihr breitester Eintrag. Wird das Fenster schmaler, erscheint stattdessen der
+    waagerechte Scrollbalken."""
+
+    def __init__(self, table: QTableWidget, col: int):
+        super().__init__(table)
+        self._table, self.col = table, col
+        table.viewport().installEventFilter(self)
+
+    def apply(self):
+        t = self._table
+        t.horizontalHeader().setSectionResizeMode(self.col, QHeaderView.Fixed)
+        others = sum(t.columnWidth(c) for c in range(t.columnCount())
+                     if c != self.col and not t.isColumnHidden(c))
+        t.setColumnWidth(self.col, max(text_width(t, self.col), t.viewport().width() - others))
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Resize:
+            self.apply()
+        return False
+
+
+def fill_column_min_text(table: QTableWidget, col: int):
+    """Spalte ``col`` fuellt den freien Platz, bleibt aber mindestens so breit wie ihr Text.
+    Nach dem Neuaufbau der Tabelle erneut aufrufen."""
+    helper = getattr(table, "_fill_column", None)
+    if helper is None or helper.col != col:
+        helper = _FillColumn(table, col)
+        table._fill_column = helper
+    helper.apply()
 
 
 # -----------------------------------------------------------
@@ -218,6 +335,7 @@ class BaseView(QWidget):
         self._table.horizontalHeader().setStretchLastSection(False)
         self._table.setSortingEnabled(True)
         self._table.cellDoubleClicked.connect(self._on_double_click)
+        self._table.cellClicked.connect(self._on_cell_clicked)
         self._table.itemSelectionChanged.connect(self._on_selection_changed)
         # Mindesthoehe fuer ~6 Datenzeilen + Header (Standard-Zeilenhoehe ~28 px)
         self._table.setMinimumHeight(6 * 28 + 36)
@@ -248,6 +366,13 @@ class BaseView(QWidget):
 
     def _add_kpi(self, label, value, variant="default"):
         self._kpi_row.addWidget(KpiCard(label, value, variant=variant))
+
+    def _on_cell_clicked(self, row, col):
+        """Klick auf ein Symbol (Historische Daten / Prognose vorhanden) blendet dessen Text ein;
+        beim Ueberfahren mit der Maus zeigt ihn der normale Tooltip."""
+        item = self._table.item(row, col)
+        if isinstance(item, _SymbolItem) and not item.icon().isNull():
+            QToolTip.showText(QCursor.pos(), item.toolTip(), self._table)
 
     def _on_double_click(self, row, col):
         pass  # ueberschreiben in Subklassen

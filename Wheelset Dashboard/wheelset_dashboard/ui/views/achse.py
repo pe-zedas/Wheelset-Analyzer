@@ -16,7 +16,7 @@ from ...logic.prognose import faelligkeit_shift
 from ..plot_widget import PlotPane
 from ..widgets import KpiCard
 
-from .common import fmt_num
+from .common import fmt_date, fmt_num
 
 
 # -----------------------------------------------------------
@@ -206,20 +206,13 @@ class AchseView(QWidget):
         self._redraw_current()
         self.time_jump_changed.emit(self._time_jump)
 
-    def _update_jump_control(self, active):
-        """Schalter nur bei X-Achse Datum bedienbar; Tooltip sagt, warum er ggf. nichts bewirkt."""
-        datum = self._x_mode == "datum"
-        self._jump_cb.setEnabled(datum)
-        if not datum:
-            tip = "Nur bei X-Achse Datum verfuegbar"
-        elif active:
-            tip = "Zeitmarken rechts der Linie zeigen das um den Abstand zu heute verschobene Datum"
-        elif self._time_jump:
-            tip = ("Ohne Wirkung: es gibt keine Prognose, oder der letzte Messwert liegt "
-                   "nicht mehr als 90 Tage zurueck")
-        else:
-            tip = "Zeitmarken ab dem ersten Prognosewert auf das aktuelle Datum verschieben"
-        self._jump_cb.setToolTip(tip)
+    def _update_jump_control(self, possible, active=False):
+        """Schalter nur zeigen, wo er etwas bewirken kann: X-Achse Datum, Prognose vorhanden und
+        letzter Messwert weit genug zurueck. Sonst ausgeblendet (der Stand bleibt erhalten)."""
+        self._jump_cb.setVisible(bool(possible))
+        self._jump_cb.setToolTip(
+            "Zeitmarken rechts der Linie zeigen das um den Abstand zu heute verschobene Datum"
+            if active else "Zeitmarken ab dem ersten Prognosewert auf das aktuelle Datum verschieben")
 
     def _on_x_mode_changed(self, idx):
         self._x_mode = "datum" if idx == 0 else "km"
@@ -235,9 +228,11 @@ class AchseView(QWidget):
 
     def _redraw_current(self):
         if self._tabs.count() == 0 or self._achse is None:
+            self._update_jump_control(False)
             return
         current = self._tabs.currentWidget()
         if not isinstance(current, PlotPane):
+            self._update_jump_control(False)
             return
         mg_name = self._tabs.tabText(self._tabs.currentIndex())
         reihen = self._reihen_for(mg_name)
@@ -250,7 +245,8 @@ class AchseView(QWidget):
             flotte=self._flotte,
             achse=self._achse,
         )
-        self._update_jump_control(getattr(current.canvas, "time_jump_active", False))
+        self._update_jump_control(getattr(current.canvas, "time_jump_possible", False),
+                                  getattr(current.canvas, "time_jump_active", False))
         self._update_kennzahlen(mg_name, reihen)
 
     def _effective_config(self):
@@ -314,14 +310,14 @@ class AchseView(QWidget):
         letzt = mr.letzter_wert()
         if letzt:
             card = KpiCard(f"{mg_name} {seite_de} (letzter)", f"{fmt_num(letzt.stand)} mm")
-            card.setSubValue(f"Messung {letzt.datum.date().isoformat()}")
+            card.setSubValue(f"Messung {fmt_date(letzt.datum)}")
             card.set_status_border(mr.status)
             widgets.append(card)
 
         def add_prog_card(label_suffix, variant, date_val, km_val):
             if date_val is None and km_val is None:
                 return
-            date_txt = date_val.date().isoformat() if date_val else "–"
+            date_txt = fmt_date(date_val) if date_val else "–"
             km_txt = (f"{km_val/1000:,.0f} Tkm".replace(",", " ")
                       if km_val is not None else "–")
             if self._x_mode == "km":

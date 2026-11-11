@@ -445,7 +445,73 @@ einzige Diagramm der Anwendung.
 Kachel „letzter Messwert“ im Achsen-Diagramm: zeigt unter dem Wert das Datum der Messung („Messung JJJJ-MM-TT“,
 `AchseView._cards_for`). Beschriftung von Schalter und Einstellung: „Zeitachse mit Prognose ab heute“.
 
+Folgeänderungen:
+- Der Schalter „Zeitachse mit Prognose ab heute“ ist **ausgeblendet**, wo er nichts bewirken kann: bei
+  X-Achse „Laufleistung“, bei Diagrammen ohne Prognose und wenn der letzte Messwert höchstens 90 Tage
+  zurückliegt (`PlotCanvas.time_jump_possible`, `AchseView._update_jump_control`). Sein Stand bleibt erhalten.
+- Die Datumsangaben in den Kacheln unter dem Diagramm (letzter Messwert, Grenz-/Warntermin) haben einheitlich
+  das Format TT.MM.JJJJ (`views/common.fmt_date`). Die Tabellen und das Gantt sind unverändert.
+- **Neue Spalte ganz rechts in den Tabellen Flotte, Einheit, Drehgestell und Lager: „Prognosewerte
+  vorhanden“** (Symbol: Diagramm mit durchgezogener, gepunktet fortgesetzter Linie, selbst gezeichnet;
+  Tooltip, 30 px, sortierbar). Regel `logic/aggregation.has_prognose`: mindestens eine Messreihe mit
+  Messwerten hat eine Treppenkurve oder einen Termin/eine Laufleistung aus der Prognose-Tabelle. Das
+  Messdaten-Symbol steht jetzt in der vorletzten Spalte. In der Einheit-Tabelle war die Symbolspalte bisher
+  nicht auf 30 px festgelegt; das ist nachgeholt. Tests: `tests/test_prognose_icon.py`.
+
+- Texte der beiden Symbole: „Historische Daten vorhanden“ (Diagramm) und „Prognose vorhanden“ (Linie, gepunktet
+  fortgesetzt). Sie erscheinen beim Überfahren mit der Maus (Tooltip der Zelle und der Spaltenüberschrift) und
+  beim Anklicken des Symbols (`BaseView._on_cell_clicked`, `QToolTip` an der Mauszeigerposition). Tests dazu in
+  `tests/test_prognose_icon.py` (Gesamt jetzt 226 Tests).
+
+- **„Messwerte anzeigen“:** Das Status-Symbol in der ersten Spalte (Gesamtstatus der Zeile) blieb bei eingeschalteter
+  Option leer, weil dort kein Messwert übergeben wird. Es wird jetzt immer angezeigt
+  (`set_ampel_cell(..., always_dot=True)` in den vier Tabellen); die Messgrößen-Spalten zeigen wie bisher Punkt und Wert.
+- **Spaltenbreiten** (`views/common.py`: `fit_to_text`, `fill_column_min_text`): Die Zählspalten (Flotte: Drehgestelle,
+  Achsen; Einheit: Achsen) sind so schmal, wie der Text samt Sortierpfeil es erfordert (statt der Qt-Standardbreite;
+  z. B. 107 → 96 px und 77 → 68 px). Die Namensspalte (Flotte: Einheit, Einheit: DG-Position, Drehgestell:
+  RS-Bezeichnung, Lager: letzte Einheit) füllt weiter den freien Platz, wird aber **nicht schmaler als ihr breitester
+  Eintrag**; wird das Fenster noch schmaler, erscheint der waagerechte Scrollbalken. Tests: `tests/test_table_columns.py`.
+
+- **Navigationsleiste im Lager-Kontext** (`MainWindow._navigate_lager`): Ein Klick auf das Lager-Drehgestell in der
+  Leiste (Lager › Drehgestell › Achse) sprang sofort zur Lager-Tabelle, weil jeder Pfad mit „lager“ dorthin führte. Jetzt
+  führt er zur Achsenliste dieses Drehgestells; „Lager“ führt zur Lager-Tabelle. Dafür merkt sich das Hauptfenster die
+  zuletzt geöffnete Lager-Komponente (nach dem Neuladen verworfen, da die Objekte veraltet sind). Außerdem bleibt
+  „Messwerte anzeigen“ in der Lager-Achsenliste jetzt in dieser Ansicht (sprang vorher zur Flotte). Tests:
+  `tests/test_navigation_lager.py`.
+
 Bewusst nicht umgesetzt: Speichern der Einstellung (erst prüfen, ob die Darstellung als Standard taugt).
+
+
+## 23. Als EXE packen (PyInstaller): Startpunkt und App-Root-Pfad
+
+Dateien: `run_dashboard.py` (neu), `config/app_paths.py`, `README.md` ("Als EXE packen"), `.gitignore`,
+`tests/test_app_paths.py`.
+
+Anlass: `pyinstaller wheelset_dashboard/main.py` (bzw. jeder direkte Aufruf dieser Datei als Skript) bricht
+mit `ImportError: attempted relative import with no known parent package` ab — `main.py` benutzt relative
+Imports (`from .config import ...`), die nur funktionieren, wenn Python die Datei als Teil des Pakets
+`wheelset_dashboard` importiert, nicht als eigenstaendiges Skript.
+
+Behoben durch `run_dashboard.py` im Projektordner (ausserhalb des Pakets), das `wheelset_dashboard.main.main`
+ganz normal importiert und aufruft; PyInstaller baut auf dieser Datei statt auf `wheelset_dashboard/main.py`.
+Dabei aufgefallen und mit behoben: `config/app_paths.py` leitete `APP_ROOT` bisher immer von `__file__` ab —
+als PyInstaller-EXE zeigt das auf das Temp-Extraktionsverzeichnis (`sys._MEIPASS`), das `--onefile` nach jedem
+Lauf verwirft. Die Betriebs-Konfiguration (Oracle-Connect-String, Logdatei) waere damit bei jedem Start weg
+gewesen. `APP_ROOT` wird jetzt im gefrorenen Betrieb (`sys.frozen`) aus `sys.executable` berechnet und liegt
+damit dauerhaft neben der `.exe`; im normalen Betrieb (Tests, `python -m wheelset_dashboard.main`) unveraendert
+der Projektordner. Mit einem echten `pyinstaller --onedir`-Build geprueft: Start ohne Fehler, Logdatei und
+(sobald benoetigt) `config/` liegen neben der `.exe`.
+
+Zwei Folgepunkte beim ersten EXE-Test: Der Ordner `config/` (Connect-String) wird nicht mitgebaut — er muss
+einmalig neben die `.exe` kopiert werden, sonst bleibt die Oracle-Verbindung leer (Einstellungsdialog zeigt das
+dann richtig). Und ohne Parameter startet die EXE wie gewohnt mit `--source csv` und sucht CSV-Dateien relativ
+zum Arbeitsverzeichnis — fuer Oracle sind `--profile`/`--source oracle` noetig. Dafuer gibt es jetzt
+`start_exe_vgf_oracle.bat` / `start_exe_abellio_oracle.bat` / `start_exe_mob_oracle.bat` (analog zu
+`start_vgf_oracle.bat` fuer die Python-Entwicklungsumgebung); beide, Batches und `config/`, muessen mit in
+`dist/` kopiert werden. Dokumentiert in `README.md` ("Als EXE packen").
+
+Bewusst nicht umgesetzt: echter Schutz vor Lesen/Veraendern des Codes — PyInstaller verpackt nur, der
+Python-Bytecode bleibt mit Aufwand extrahierbar.
 
 
 ## Tests
@@ -453,5 +519,5 @@ Bewusst nicht umgesetzt: Speichern der Einstellung (erst prüfen, ob die Darstel
 `tests/test_abellio_profile.py` (33 Fälle): Namensvarianten inkl. des
 Laufradsatz-Falls, Nullwerte, kollidierende Drehgestelle, Einheit ohne
 Struktur, Toleranzbereiche als Grenzwerte, nicht zuordenbare Lager-Zeilen und
-dass VGF unverändert bleibt. `tests/test_donut_counts.py` (4 Fälle) sichert die Donut-Zählung, `tests/test_mob_profile.py` (23 Fälle) das MOB-Profil (echte Bezeichnungen, Messpositionen, unvollständige Termine, Lager, Drehgestell-Wechsel), `tests/test_lager_reinstalled.py` (5 Fälle) das Ausblenden wieder eingebauter Komponenten. Gesamt 212 Tests grün (neu: `test_time_axis.py` 19 Fälle, `test_smoke_profiles.py` 15 Fälle, `test_background_loading.py` 9, `test_aggregation.py` 10, `test_app_paths.py` 16, `test_repository.py` 7, `test_achse_view_controls.py` 6, `test_messdaten_icon.py` 8, `test_structure.py` 19, `test_perf.py` 5, `test_backend_runner.py` 15, `test_settings_dialog.py` 7); zusätzlich ein
+dass VGF unverändert bleibt. `tests/test_donut_counts.py` (4 Fälle) sichert die Donut-Zählung, `tests/test_mob_profile.py` (23 Fälle) das MOB-Profil (echte Bezeichnungen, Messpositionen, unvollständige Termine, Lager, Drehgestell-Wechsel), `tests/test_lager_reinstalled.py` (5 Fälle) das Ausblenden wieder eingebauter Komponenten. Gesamt 239 Tests grün (neu: `test_navigation_lager.py` 5 Fälle, `test_table_columns.py` 6 Fälle, `test_prognose_icon.py` 12 Fälle, `test_time_axis.py` 21 Fälle, `test_smoke_profiles.py` 15 Fälle, `test_background_loading.py` 9, `test_aggregation.py` 10, `test_app_paths.py` 18 (neu: App-Root als PyInstaller-EXE), `test_repository.py` 7, `test_achse_view_controls.py` 6, `test_messdaten_icon.py` 8, `test_structure.py` 19, `test_perf.py` 5, `test_backend_runner.py` 15, `test_settings_dialog.py` 7); zusätzlich ein
 Strukturvergleich VGF vor/nach der Änderung (identischer Fingerabdruck).

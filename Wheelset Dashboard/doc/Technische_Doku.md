@@ -205,9 +205,10 @@ Testaufbau (`tests/`, `pytest.ini`; Qt läuft ohne Bildschirm):
 | `test_aggregation.py`, `test_donut_counts.py` | Donut-Zählung (Flotte und Lager), Messgrößen-Spalten, Gantt-Daten |
 | `test_smoke_profiles.py` | je Profil mit synthetischen Daten (`synth.py`): laden, Fenster, jede Ebene bis zum Diagramm, Werkstattliste, Rohdaten-Export |
 | `test_background_loading.py` | Laden/Backend im Hintergrund: Fenster sofort bedienbar, Fehler, Zusammenfassen, Profilwechsel |
-| `test_app_paths.py`, `test_repository.py` | Connect-String-Datei (keine fremden Zugangsdaten), Quellenwahl |
+| `test_app_paths.py`, `test_repository.py` | Connect-String-Datei (keine fremden Zugangsdaten), Quellenwahl, App-Root im Entwicklungsbetrieb vs. als PyInstaller-EXE |
 | `test_structure.py`, `test_perf.py` | CSV- und Oracle-Weg ergeben dieselbe Struktur und Prognose, Markierung synthetischer Strukturen, Parser, Zeitmesser |
-| `test_achse_view_controls.py`, `test_messdaten_icon.py` | Achsen-Diagramm (Auswahl), Spalte „Messdaten vorhanden“ |
+| `test_achse_view_controls.py`, `test_messdaten_icon.py`, `test_prognose_icon.py` | Achsen-Diagramm (Auswahl), Spalten „Messdaten vorhanden“ und „Prognosewerte vorhanden“, Datumsformat der Kacheln |
+| `test_time_axis.py` | Zeitachse mit Prognose ab heute: Marken, Beschriftung, Schalter im Diagramm |
 | `test_lager_reinstalled.py`, `test_lager_state.py`, `test_status.py` | Lager-Logik, Ampel |
 
 Smoke-Test der Datenschicht (nur Konsole):

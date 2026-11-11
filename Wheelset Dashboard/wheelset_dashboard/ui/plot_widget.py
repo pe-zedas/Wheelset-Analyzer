@@ -223,9 +223,11 @@ class PlotCanvas(FigureCanvasQTAgg):
         prognose_drawn = self._draw_prognosen(reihen, x_mode)
         self._draw_thresholds(limits)
         # Zeitachse mit Sprung zum aktuellen Datum (Einstellung "Darstellung"): ersetzt die Heute-Linie
-        jump = None
-        if x_mode == "datum" and prognose_drawn and getattr(prognose_config, "time_jump", False):
-            jump = self._time_jump(reihen, today or datetime.now())
+        possible = None
+        if x_mode == "datum" and prognose_drawn:
+            possible = self._time_jump(reihen, today or datetime.now())
+        jump = possible if getattr(prognose_config, "time_jump", False) else None
+        self.time_jump_possible = possible is not None   # fuer den Schalter in der Achsen-Ansicht
         if today is not None and x_mode == "datum" and jump is None:
             self._draw_today(today)
 

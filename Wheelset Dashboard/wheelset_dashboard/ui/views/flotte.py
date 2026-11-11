@@ -29,7 +29,11 @@ from .common import (
     MGROESSEN_SPALTEN,
     set_ampel_cell,
     set_messdaten_cell,
+    set_prognose_cell,
+    fill_column_min_text,
+    fit_to_text,
     setup_messdaten_column,
+    setup_prognose_column,
     show_values,
 )
 
@@ -118,8 +122,9 @@ class FlotteView(BaseView):
             f"letzten Messwert)"
         )
         headers = ["", "Einheit", "Drehgestelle", "Achsen"] + \
-                  [MGROESSEN_LABEL[k] for k in MGROESSEN_SPALTEN] + [""]
-        c_data = len(headers) - 1
+                  [MGROESSEN_LABEL[k] for k in MGROESSEN_SPALTEN] + ["", ""]
+        c_data = len(headers) - 2
+        c_prog = len(headers) - 1
         self._table.setSortingEnabled(False)
         self._table.setColumnCount(len(headers))
         self._table.setHorizontalHeaderLabels(headers)
@@ -128,7 +133,7 @@ class FlotteView(BaseView):
         self._table.verticalHeader().setDefaultSectionSize(36)
 
         for row, e in enumerate(self._einheiten):
-            set_ampel_cell(self._table, row, 0, e.status())
+            set_ampel_cell(self._table, row, 0, e.status(), always_dot=True)
             self._table.setItem(row, 1, QTableWidgetItem(e.topeinheit_bez))
             self._table.setItem(row, 2, QTableWidgetItem(str(n_real_dg(e))))
             self._table.setItem(row, 3, QTableWidgetItem(
@@ -138,12 +143,12 @@ class FlotteView(BaseView):
                 s, v = mg_data.get(mg, (StatusAmpel.GRAY, None))
                 set_ampel_cell(self._table, row, 4 + i, s, v)
             set_messdaten_cell(self._table, row, c_data, e)
+            set_prognose_cell(self._table, row, c_prog, e)
         self._table.setSortingEnabled(True)
         self._apply_filter(self._filter_edit.text())
 
         self._table.resizeColumnsToContents()
         hdr = self._table.horizontalHeader()
-        hdr.setSectionResizeMode(1, QHeaderView.Stretch)
         col_w = 76 if show_values() else 60
         for i in range(4, 4 + len(MGROESSEN_SPALTEN)):
             hdr.setSectionResizeMode(i, QHeaderView.Fixed)
@@ -151,6 +156,10 @@ class FlotteView(BaseView):
         hdr.setSectionResizeMode(0, QHeaderView.Fixed)
         self._table.setColumnWidth(0, 28)
         setup_messdaten_column(self._table, c_data)
+        setup_prognose_column(self._table, c_prog)
+        fit_to_text(self._table, 2)          # Drehgestelle
+        fit_to_text(self._table, 3)          # Achsen
+        fill_column_min_text(self._table, 1)  # Einheit: fuellt, aber nie schmaler als der Text
 
     def _apply_filter(self, text: str):
         super()._apply_filter(text)
